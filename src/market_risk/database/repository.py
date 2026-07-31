@@ -11,7 +11,7 @@ class MarketDataRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def upsert_prices(self, records: list[dict]) -> int:
+    def upsert_prices(self, records: list[dict[str, object]]) -> int:
         """Insert or ignore price records. Returns count of new rows."""
         if not records:
             return 0
@@ -19,7 +19,7 @@ class MarketDataRepository:
         stmt = stmt.on_conflict_do_nothing(index_elements=["ticker", "date"])
         result = self.session.execute(stmt)
         self.session.commit()
-        return result.rowcount  # type: ignore[return-value]
+        return int(result.rowcount)  # type: ignore[arg-type]
 
     def get_prices(
         self, ticker: str, start: date | None = None, end: date | None = None

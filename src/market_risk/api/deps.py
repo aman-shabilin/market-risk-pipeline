@@ -26,4 +26,5 @@ def get_repository(request: Request) -> Generator[MarketDataRepository, None, No
 
 
 def get_cache(request: Request) -> CacheBackend:
-    return request.app.state.cache
+    cache: CacheBackend = request.app.state.cache
+    return cache

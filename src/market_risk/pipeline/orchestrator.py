@@ -39,7 +39,7 @@ class PipelineOrchestrator:
         if not files:
             return result
 
-        all_records: list[dict] = []
+        all_records: list[dict[str, object]] = []
         for file_path in files:
             df = self.source.read_file(file_path)
             records, errors = self._validate_dataframe(df)
@@ -61,8 +61,8 @@ class PipelineOrchestrator:
 
         return result
 
-    def _validate_dataframe(self, df: pd.DataFrame) -> tuple[list[dict], int]:
-        records: list[dict] = []
+    def _validate_dataframe(self, df: pd.DataFrame) -> tuple[list[dict[str, object]], int]:
+        records: list[dict[str, object]] = []
         errors = 0
         for _, row in df.iterrows():
             try:

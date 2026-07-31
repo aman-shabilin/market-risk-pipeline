@@ -41,7 +41,9 @@ class RedisCache(CacheBackend):
 
     async def get(self, key: str) -> str | None:
         value = await self._redis.get(key)
-        return value.decode() if value else None
+        if value is None:
+            return None
+        return value if isinstance(value, str) else value.decode()
 
     async def set(self, key: str, value: str, ttl: int) -> None:
         await self._redis.setex(key, ttl, value)
