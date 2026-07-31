@@ -1,8 +1,8 @@
+from market_risk.config import Settings
 from market_risk.ingestion.base import DataSource
 from market_risk.ingestion.local_source import LocalSource
 from market_risk.ingestion.s3_source import S3Source
 from market_risk.ingestion.yahoo_source import YahooFinanceSource
-from market_risk.config import Settings
 
 
 def get_data_source(settings: Settings) -> DataSource:

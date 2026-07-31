@@ -1,8 +1,6 @@
-import pytest
-from datetime import date
-from pathlib import Path
 
-from market_risk.config import Settings
+import pytest
+
 from market_risk.database.engine import Base, get_engine, get_session_factory
 from market_risk.database.repository import MarketDataRepository
 from market_risk.ingestion.local_source import LocalSource

@@ -1,6 +1,3 @@
-import pandas as pd
-import pytest
-from pathlib import Path
 
 from market_risk.ingestion.local_source import LocalSource
 

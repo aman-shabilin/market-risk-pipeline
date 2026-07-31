@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import String, Date, DateTime, UniqueConstraint, Float, Integer
+from sqlalchemy import Date, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from market_risk.database.engine import Base

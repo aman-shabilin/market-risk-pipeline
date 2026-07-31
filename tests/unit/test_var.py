@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from market_risk.metrics.var import historical_var, parametric_var
 

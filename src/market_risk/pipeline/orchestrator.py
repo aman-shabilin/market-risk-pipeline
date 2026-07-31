@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 from pydantic import ValidationError
@@ -94,7 +94,7 @@ class PipelineOrchestrator:
 
         metric = ComputedMetric(
             ticker=ticker,
-            computed_at=datetime.now(timezone.utc),
+            computed_at=datetime.now(UTC),
             window_start=dates[0],
             window_end=dates[-1],
             annualized_volatility=vol,

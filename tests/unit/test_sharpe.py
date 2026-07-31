@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 
 from market_risk.metrics.sharpe import sharpe_ratio
 

@@ -1,9 +1,5 @@
 from datetime import date
 
-import pytest
-
-from market_risk.database.models import MarketPrice
-
 
 class TestMarketDataRepository:
     def test_upsert_prices(self, repository):
@@ -57,8 +53,16 @@ class TestMarketDataRepository:
 
     def test_list_tickers(self, repository):
         records = [
-            {"ticker": "AAPL", "date": date(2024, 1, 2), "open": 185.5, "high": 186.2, "low": 184.8, "close": 185.9, "volume": 50000000},
-            {"ticker": "MSFT", "date": date(2024, 1, 2), "open": 372.5, "high": 374.8, "low": 371.2, "close": 373.9, "volume": 28000000},
+            {
+                "ticker": "AAPL", "date": date(2024, 1, 2),
+                "open": 185.5, "high": 186.2, "low": 184.8,
+                "close": 185.9, "volume": 50000000,
+            },
+            {
+                "ticker": "MSFT", "date": date(2024, 1, 2),
+                "open": 372.5, "high": 374.8, "low": 371.2,
+                "close": 373.9, "volume": 28000000,
+            },
         ]
         repository.upsert_prices(records)
         tickers = repository.list_tickers()

@@ -32,7 +32,8 @@ class YahooFinanceSource(DataSource):
         )
 
         if raw.empty:
-            return pd.DataFrame(columns=["ticker", "date", "open", "high", "low", "close", "volume"])
+            cols = ["ticker", "date", "open", "high", "low", "close", "volume"]
+            return pd.DataFrame(columns=cols)
 
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)

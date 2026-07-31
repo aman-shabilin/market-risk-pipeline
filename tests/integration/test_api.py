@@ -1,7 +1,6 @@
+
 import pytest
 from fastapi.testclient import TestClient
-from pathlib import Path
-import shutil
 
 from market_risk.api.app import create_app
 from market_risk.config import Settings

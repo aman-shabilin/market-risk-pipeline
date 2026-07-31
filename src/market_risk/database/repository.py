@@ -1,10 +1,10 @@
 from datetime import date
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session
 
-from market_risk.database.models import MarketPrice, ComputedMetric
+from market_risk.database.models import ComputedMetric, MarketPrice
 
 
 class MarketDataRepository:
