@@ -1,17 +1,21 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings
+
+DataSourceName = Literal["local", "s3", "yahoo"]
 
 
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./market_risk.db"
 
+    data_source: DataSourceName = "local"
+
+    local_data_path: str = "./data/sample"
+
     s3_bucket: str = ""
     s3_prefix: str = "market-data/"
     aws_region: str = "us-east-1"
 
-    use_local_source: bool = True
-    local_data_path: str = "./data/sample"
-
-    data_source: str = "local"  # "local", "s3", or "yahoo"
     yahoo_tickers: str = "AAPL,MSFT,GOOGL"
     yahoo_period_days: int = 365
 
