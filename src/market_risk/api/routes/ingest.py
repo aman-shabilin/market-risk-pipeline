@@ -11,9 +11,9 @@ router = APIRouter(prefix="/api/v1/ingest", tags=["ingest"])
 
 @router.post("/", response_model=PipelineStatus)
 def trigger_ingest(
+    request: Request,
     ticker: str | None = None,
     repo: MarketDataRepository = Depends(get_repository),
-    request: Request = None,  # type: ignore[assignment]
 ) -> PipelineStatus:
     settings = request.app.state.settings
     source = get_data_source(settings)
@@ -21,7 +21,7 @@ def trigger_ingest(
     result = orchestrator.run(ticker_filter=ticker)
 
     return PipelineStatus(
-        last_run=None,
+        last_run=result.finished_at,
         rows_ingested=result.rows_ingested,
         errors=result.validation_errors,
         tickers_processed=result.tickers_processed,

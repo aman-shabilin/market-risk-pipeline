@@ -21,6 +21,9 @@ dependencies = [
     "yfinance>=0.2.40",
 ]
 
+[project.scripts]
+market-risk-ingest = "market_risk.pipeline.orchestrator:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

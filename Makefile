@@ -17,4 +17,4 @@ docker-up:
 	docker compose up --build
 
 ingest:
-	python -m market_risk.pipeline.orchestrator
+	market-risk-ingest
