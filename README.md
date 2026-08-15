@@ -1,2 +1,186 @@
 # market-risk-pipeline
-Market risk analytics pipeline
+
+Ingests daily OHLCV market data from a pluggable source, computes standard risk
+metrics, and serves them over a REST API.
+
+```
+source (local CSV / S3 / Yahoo)  ->  validate  ->  SQL  ->  metrics  ->  REST + cache
+```
+
+## Quick start
+
+```bash
+make install                       # pip install -e ".[dev]"
+cp .env.example .env               # optional; defaults work out of the box
+make ingest                        # one ingestion pass from the configured source
+make run                           # uvicorn on http://localhost:8000
+```
+
+Then open <http://localhost:8000/docs> for interactive API docs.
+
+With Docker (brings up Redis as well):
+
+```bash
+make docker-up
+```
+
+## API
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness check. |
+| `GET` | `/api/v1/metrics/tickers` | Tickers with stored price data. |
+| `GET` | `/api/v1/metrics/{ticker}` | Risk metrics for a ticker. |
+| `POST` | `/api/v1/ingest/` | Trigger an ingestion pass. Optional `?ticker=AAPL`. |
+
+### Metrics endpoint
+
+Called without dates, it returns the latest metric set precomputed by the
+pipeline over the ticker's full stored history:
+
+```bash
+curl localhost:8000/api/v1/metrics/AAPL
+```
+
+Called with `start_date` and/or `end_date` (ISO `YYYY-MM-DD`, both inclusive),
+metrics are computed on demand from the prices in that window:
+
+```bash
+curl "localhost:8000/api/v1/metrics/AAPL?start_date=2025-01-01&end_date=2025-06-30"
+```
+
+```json
+{
+  "ticker": "AAPL",
+  "start_date": "2025-01-02",
+  "end_date": "2025-06-30",
+  "annualized_volatility": 0.248312,
+  "var_95": 0.020281,
+  "var_99": 0.031174,
+  "cvar_95": 0.032215,
+  "cvar_99": 0.040883,
+  "sharpe_ratio": 2.014118,
+  "max_drawdown": 0.138042
+}
+```
+
+`start_date` and `end_date` are reported as the first and last trading day
+actually present in the window, which may differ from what was requested.
+
+Responses are cached for `MR_CACHE_TTL_SECONDS` per distinct
+`(ticker, start_date, end_date)` key.
+
+Error responses:
+
+| Status | Condition |
+| --- | --- |
+| `404` | Unknown ticker, or no price data in the requested window. |
+| `422` | Malformed date, `start_date` after `end_date`, or fewer than 3 price points in the window. |
+
+## Metrics
+
+All metrics derive from simple daily returns of the closing price. Annualization
+uses 252 trading days. VaR and CVaR are returned as **positive loss
+magnitudes** — `var_95 = 0.02` means a 2% one-day loss at 95% confidence.
+
+| Metric | Definition |
+| --- | --- |
+| `annualized_volatility` | Standard deviation of daily returns × √252. |
+| `var_95` / `var_99` | Historical Value-at-Risk: the loss at the 5th / 1st return percentile. |
+| `cvar_95` / `cvar_99` | Conditional VaR (expected shortfall): mean loss in the tail beyond VaR. Always ≥ the matching VaR. |
+| `sharpe_ratio` | Annualized mean excess return over standard deviation, at a 2% risk-free rate. |
+| `max_drawdown` | Largest peak-to-trough decline, as a positive fraction. |
+
+`parametric_var` (normal-distribution VaR) is also available in
+`market_risk.metrics` but is not part of the persisted metric set.
+
+A window needs at least 3 price points. Any window producing a non-finite value
+is rejected rather than persisted or served.
+
+## Configuration
+
+All settings are read from environment variables prefixed `MR_`, or from a
+`.env` file. See `.env.example`.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `MR_DATABASE_URL` | `sqlite:///./market_risk.db` | Any SQLAlchemy URL. |
+| `MR_DATA_SOURCE` | `local` | One of `local`, `s3`, `yahoo`. Invalid values fail at startup. |
+| `MR_LOCAL_DATA_PATH` | `./data/sample` | Directory of CSVs, for `local`. |
+| `MR_S3_BUCKET` | — | For `s3`. |
+| `MR_S3_PREFIX` | `market-data/` | For `s3`. |
+| `MR_AWS_REGION` | `us-east-1` | For `s3`. |
+| `MR_YAHOO_TICKERS` | `AAPL,MSFT,GOOGL` | Comma-separated, for `yahoo`. |
+| `MR_YAHOO_PERIOD_DAYS` | `365` | Lookback window, for `yahoo`. |
+| `MR_REDIS_URL` | — | Empty uses an in-process cache instead. |
+| `MR_CACHE_TTL_SECONDS` | `300` | Metrics response TTL. |
+| `MR_API_HOST` / `MR_API_PORT` | `0.0.0.0` / `8000` | |
+
+## Data sources
+
+Sources implement the `DataSource` interface (`list_files`, `read_file`) and are
+selected at runtime by `MR_DATA_SOURCE`:
+
+- **`local`** — reads `*.csv` from `MR_LOCAL_DATA_PATH`. Sample data ships in `data/sample/`.
+- **`s3`** — reads `*.csv` under `s3://$MR_S3_BUCKET/$MR_S3_PREFIX` via boto3.
+- **`yahoo`** — downloads adjusted OHLCV per ticker via `yfinance`.
+
+Expected CSV columns: `ticker,date,open,high,low,close,volume`.
+
+Rows are validated with Pydantic before insertion — tickers are upper-cased,
+volume must be non-negative, and `high` must be ≥ `low`. Invalid rows are
+counted and skipped rather than failing the batch; the count is returned as
+`errors` from the ingest endpoint.
+
+## Layout
+
+```
+src/market_risk/
+  config.py            Settings (pydantic-settings)
+  ingestion/           DataSource interface + local, S3, Yahoo implementations
+  schemas/             Pydantic validation and API response models
+  metrics/             Metric functions; service.py assembles the full set
+  database/            SQLAlchemy models, engine, repository
+  pipeline/            Orchestrator (also the `make ingest` entrypoint)
+  api/                 FastAPI app, routes, DI, cache backends
+```
+
+`metrics/service.py` is the single source of truth for metric computation, so
+the precomputed pipeline path and the on-demand API path cannot drift apart.
+
+## Storage
+
+Two tables:
+
+- **`market_prices`** — unique on `(ticker, date)`, so re-ingesting overlapping
+  data is idempotent. Insertion uses native `ON CONFLICT DO NOTHING` on SQLite
+  and PostgreSQL, with a pre-filtered plain insert as a fallback on other
+  dialects.
+- **`computed_metrics`** — unique on `(ticker, window_start, window_end)`.
+  Re-running the pipeline updates the existing row for a window rather than
+  appending, so the table stays bounded.
+
+Schema is created via `Base.metadata.create_all` at startup. There are no
+migrations yet, so changing a model against an existing database needs a manual
+`ALTER` or a fresh database file.
+
+## Development
+
+```bash
+make test                  # pytest with coverage (80% gate)
+make lint                  # ruff + mypy --strict
+```
+
+CI runs tests, lint, type-check, and a Docker build on every push and PR to
+`main`.
+
+Tests use in-memory SQLite. Note that `Settings()` reads `.env` by default —
+tests asserting on declared defaults pass `_env_file=None` to stay isolated from
+your local config.
+
+## Known gaps
+
+- No Alembic migrations.
+- `POST /api/v1/ingest/` runs synchronously; a large Yahoo or S3 pull will block the request.
+- Yahoo ingestion fetches one ticker per call with no rate limiting or retry.
+- `sharpe_ratio` hardcodes a 2% risk-free rate.
