@@ -26,7 +26,6 @@ def app_with_data(tmp_path):
     settings = Settings(
         database_url=f"sqlite:///{tmp_path}/test.db",
         data_source="local",
-        use_local_source=True,
         local_data_path=str(tmp_path),
         redis_url=None,
     )
