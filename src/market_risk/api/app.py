@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from market_risk.api.cache import build_cache
-from market_risk.api.routes import health, ingest, metrics
+from market_risk.api.routes import health, ingest, metrics, portfolio
 from market_risk.config import Settings
 from market_risk.database.engine import Base, get_engine, get_session_factory
 
@@ -33,4 +33,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(ingest.router)
+    app.include_router(portfolio.router)
     return app
