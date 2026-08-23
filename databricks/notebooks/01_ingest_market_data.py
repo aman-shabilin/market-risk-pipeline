@@ -300,7 +300,7 @@ print(f"  Operation: {merge_metrics['operation']}")
 
 from pyspark.sql.functions import lit, current_timestamp, array
 
-tickers_processed = validated_df.select("ticker").distinct().rdd.flatMap(lambda x: x).collect()
+tickers_processed = [row.ticker for row in validated_df.select("ticker").distinct().collect()]
 
 spark.sql(f"""
 UPDATE {full_schema}.pipeline_runs

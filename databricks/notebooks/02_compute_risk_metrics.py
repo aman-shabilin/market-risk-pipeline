@@ -80,7 +80,7 @@ ticker_counts = (
     .filter(F.col("num_days") >= min_price_points)
 )
 
-eligible_tickers = ticker_counts.select("ticker").rdd.flatMap(lambda x: x).collect()
+eligible_tickers = [row.ticker for row in ticker_counts.select("ticker").collect()]
 print(f"Eligible tickers (>= {min_price_points} days): {len(eligible_tickers)}")
 print(f"  {eligible_tickers}")
 
@@ -292,7 +292,7 @@ print("Rolling metrics view created.")
 
 # COMMAND ----------
 
-tickers_computed = metrics_clean.select("ticker").distinct().rdd.flatMap(lambda x: x).collect()
+tickers_computed = [row.ticker for row in metrics_clean.select("ticker").distinct().collect()]
 
 spark.sql(f"""
 UPDATE {full_schema}.pipeline_runs
