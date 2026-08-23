@@ -83,7 +83,7 @@
     {
       "environment_key": "pipeline_env",
       "spec": {
-        "client": "1",
+        "client": "2",
         "dependencies": [
           "yfinance"
         ]
