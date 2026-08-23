@@ -29,3 +29,20 @@ class MarketDataRow(BaseModel):
         if self.high < self.low:
             raise ValueError("high must be >= low")
         return self
+
+
+class PricePoint(BaseModel):
+    date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+
+
+class PriceHistoryResponse(BaseModel):
+    ticker: str
+    total: int
+    offset: int
+    limit: int
+    data: list[PricePoint]

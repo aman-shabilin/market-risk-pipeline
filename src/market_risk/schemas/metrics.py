@@ -21,3 +21,20 @@ class PipelineStatus(BaseModel):
     rows_ingested: int
     errors: int
     tickers_processed: list[str]
+
+
+class ReturnsResponse(BaseModel):
+    ticker: str
+    count: int
+    mean: float
+    std: float
+    min: float
+    max: float
+    dates: list[str]
+    values: list[float]
+
+
+class RollingMetricsPoint(BaseModel):
+    date: date
+    annualized_volatility: float | None
+    var_95: float | None
