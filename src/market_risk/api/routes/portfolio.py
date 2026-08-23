@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import delete as sql_delete, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from market_risk.api.deps import get_repository
 from market_risk.database.models import Portfolio, PortfolioHolding
@@ -13,6 +15,7 @@ from market_risk.schemas.portfolio import (
     PortfolioCreate,
     PortfolioResponse,
     PortfolioRiskResponse,
+    PortfolioUpdate,
 )
 
 router = APIRouter(prefix="/api/v1/portfolios", tags=["portfolios"])
@@ -25,51 +28,127 @@ def create_portfolio(
 ) -> PortfolioResponse:
     session = repo.session
 
-    existing = session.scalar(select(Portfolio).where(Portfolio.name == body.name))
-    if existing:
-        raise HTTPException(status_code=409, detail=f"Portfolio '{body.name}' already exists")
-
     total_weight = sum(h.weight for h in body.holdings)
     portfolio = Portfolio(
         name=body.name,
         created_at=datetime.now(timezone.utc),
         holdings=[
-            PortfolioHolding(ticker=h.ticker, weight=h.weight / total_weight)
+            PortfolioHolding(
+                ticker=h.ticker, weight=h.weight / total_weight
+            )
             for h in body.holdings
         ],
     )
     session.add(portfolio)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Portfolio '{body.name}' already exists",
+        )
     session.refresh(portfolio)
 
     return PortfolioResponse(
         id=portfolio.id,
         name=portfolio.name,
         created_at=portfolio.created_at,
-        holdings=[{"ticker": h.ticker, "weight": h.weight} for h in portfolio.holdings],
+        holdings=[
+            {"ticker": h.ticker, "weight": h.weight}
+            for h in portfolio.holdings
+        ],
     )
 
 
 @router.get("/", response_model=list[PortfolioResponse])
 def list_portfolios(
+    limit: int = Query(50, ge=1, le=500, description="Max portfolios to return"),
+    offset: int = Query(0, ge=0, description="Portfolios to skip"),
     repo: MarketDataRepository = Depends(get_repository),
 ) -> list[PortfolioResponse]:
     session = repo.session
-    portfolios = list(session.scalars(select(Portfolio)).all())
+    portfolios = list(
+        session.scalars(
+            select(Portfolio)
+            .options(selectinload(Portfolio.holdings))
+            .offset(offset)
+            .limit(limit)
+        ).all()
+    )
     return [
         PortfolioResponse(
             id=p.id,
             name=p.name,
             created_at=p.created_at,
-            holdings=[{"ticker": h.ticker, "weight": h.weight} for h in p.holdings],
+            holdings=[
+                {"ticker": h.ticker, "weight": h.weight}
+                for h in p.holdings
+            ],
         )
         for p in portfolios
     ]
 
 
+@router.put("/{name}", response_model=PortfolioResponse)
+def update_portfolio(
+    name: str,
+    body: PortfolioUpdate,
+    repo: MarketDataRepository = Depends(get_repository),
+) -> PortfolioResponse:
+    session = repo.session
+    portfolio = session.scalar(
+        select(Portfolio).options(selectinload(Portfolio.holdings)).where(Portfolio.name == name)
+    )
+    if not portfolio:
+        raise HTTPException(status_code=404, detail=f"Portfolio '{name}' not found")
+
+    session.execute(
+        sql_delete(PortfolioHolding).where(PortfolioHolding.portfolio_id == portfolio.id)
+    )
+
+    total_weight = sum(h.weight for h in body.holdings)
+    new_holdings = [
+        PortfolioHolding(
+            portfolio_id=portfolio.id,
+            ticker=h.ticker,
+            weight=h.weight / total_weight,
+        )
+        for h in body.holdings
+    ]
+    session.add_all(new_holdings)
+    session.commit()
+
+    session.refresh(portfolio)
+    return PortfolioResponse(
+        id=portfolio.id,
+        name=portfolio.name,
+        created_at=portfolio.created_at,
+        holdings=[
+            {"ticker": h.ticker, "weight": h.weight}
+            for h in portfolio.holdings
+        ],
+    )
+
+
+@router.delete("/{name}", status_code=204)
+def delete_portfolio(
+    name: str,
+    repo: MarketDataRepository = Depends(get_repository),
+) -> None:
+    session = repo.session
+    portfolio = session.scalar(select(Portfolio).where(Portfolio.name == name))
+    if not portfolio:
+        raise HTTPException(status_code=404, detail=f"Portfolio '{name}' not found")
+
+    session.delete(portfolio)
+    session.commit()
+
+
 @router.get("/{name}/risk", response_model=PortfolioRiskResponse)
 def get_portfolio_risk(
     name: str,
+    request: Request,
     repo: MarketDataRepository = Depends(get_repository),
 ) -> PortfolioRiskResponse:
     session = repo.session
@@ -93,7 +172,8 @@ def get_portfolio_risk(
             detail="No price data available for portfolio tickers. Run ingest first.",
         )
 
-    result = compute_portfolio_risk(returns_by_ticker, weights)
+    rfr = request.app.state.settings.risk_free_rate
+    result = compute_portfolio_risk(returns_by_ticker, weights, risk_free_rate=rfr)
     if result is None:
         raise HTTPException(status_code=404, detail="Insufficient data to compute portfolio risk")
 

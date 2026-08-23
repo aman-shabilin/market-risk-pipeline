@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import pydantic
 from pydantic import BaseModel, field_validator
 
 
@@ -21,7 +22,18 @@ class HoldingInput(BaseModel):
 
 
 class PortfolioCreate(BaseModel):
-    name: str
+    name: str = pydantic.Field(max_length=100)
+    holdings: list[HoldingInput]
+
+    @field_validator("holdings")
+    @classmethod
+    def at_least_one_holding(cls, v: list[HoldingInput]) -> list[HoldingInput]:
+        if len(v) < 1:
+            raise ValueError("portfolio must have at least one holding")
+        return v
+
+
+class PortfolioUpdate(BaseModel):
     holdings: list[HoldingInput]
 
     @field_validator("holdings")
