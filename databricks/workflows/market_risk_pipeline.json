@@ -12,7 +12,7 @@
     "pause_status": "UNPAUSED"
   },
   "email_notifications": {
-    "on_failure": ["data-team@company.com"],
+    "on_failure": ["amanbilin13@gmail.com"],
     "on_success": [],
     "no_alert_for_skipped_runs": true
   },
@@ -22,7 +22,7 @@
       "task_key": "ingest_market_data",
       "description": "Ingest OHLCV data from Yahoo Finance into Delta Lake",
       "notebook_task": {
-        "notebook_path": "/Repos/market-risk-pipeline/databricks/notebooks/01_ingest_market_data",
+        "notebook_path": "/Repos/Market Data Analysis/market-risk-pipeline/databricks/notebooks/01_ingest_market_data",
         "base_parameters": {
           "catalog": "market_risk",
           "schema": "analytics",
@@ -32,7 +32,7 @@
         },
         "source": "WORKSPACE"
       },
-      "job_cluster_key": "pipeline_cluster",
+      "environment_key": "pipeline_env",
       "timeout_seconds": 1800,
       "retry_on_timeout": false,
       "max_retries": 2,
@@ -45,7 +45,7 @@
         {"task_key": "ingest_market_data"}
       ],
       "notebook_task": {
-        "notebook_path": "/Repos/market-risk-pipeline/databricks/notebooks/03_data_quality_checks",
+        "notebook_path": "/Repos/Market Data Analysis/market-risk-pipeline/databricks/notebooks/03_data_quality_checks",
         "base_parameters": {
           "catalog": "market_risk",
           "schema": "analytics",
@@ -54,7 +54,7 @@
         },
         "source": "WORKSPACE"
       },
-      "job_cluster_key": "pipeline_cluster",
+      "environment_key": "pipeline_env",
       "timeout_seconds": 600,
       "max_retries": 1
     },
@@ -65,7 +65,7 @@
         {"task_key": "data_quality_checks"}
       ],
       "notebook_task": {
-        "notebook_path": "/Repos/market-risk-pipeline/databricks/notebooks/02_compute_risk_metrics",
+        "notebook_path": "/Repos/Market Data Analysis/market-risk-pipeline/databricks/notebooks/02_compute_risk_metrics",
         "base_parameters": {
           "catalog": "market_risk",
           "schema": "analytics",
@@ -74,43 +74,23 @@
         },
         "source": "WORKSPACE"
       },
-      "job_cluster_key": "pipeline_cluster",
+      "environment_key": "pipeline_env",
       "timeout_seconds": 1200,
       "max_retries": 1
     }
   ],
-  "job_clusters": [
+  "environments": [
     {
-      "job_cluster_key": "pipeline_cluster",
-      "new_cluster": {
-        "spark_version": "14.3.x-scala2.12",
-        "node_type_id": "i3.xlarge",
-        "num_workers": 2,
-        "autoscale": {
-          "min_workers": 1,
-          "max_workers": 4
-        },
-        "spark_conf": {
-          "spark.sql.adaptive.enabled": "true",
-          "spark.sql.shuffle.partitions": "auto"
-        },
-        "custom_tags": {
-          "pipeline": "market-risk",
-          "cost_center": "data-eng"
-        },
-        "cluster_log_conf": {
-          "dbfs": {
-            "destination": "dbfs:/cluster-logs/market-risk"
-          }
-        },
-        "runtime_engine": "PHOTON"
+      "environment_key": "pipeline_env",
+      "spec": {
+        "client": "1",
+        "dependencies": [
+          "yfinance"
+        ]
       }
     }
   ],
   "queue": {
     "enabled": true
-  },
-  "run_as": {
-    "service_principal_name": "market-risk-pipeline-sp"
   }
 }

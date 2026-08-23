@@ -167,8 +167,8 @@ CREATE TABLE IF NOT EXISTS {full_schema}.pipeline_runs (
     status              STRING      NOT NULL    COMMENT 'running / succeeded / failed',
     started_at          TIMESTAMP   NOT NULL,
     finished_at         TIMESTAMP,
-    rows_processed      BIGINT      DEFAULT 0,
-    rows_failed         BIGINT      DEFAULT 0,
+    rows_processed      BIGINT,
+    rows_failed         BIGINT,
     tickers_processed   ARRAY<STRING>,
     error_message       STRING,
     parameters          STRING      COMMENT 'JSON of run parameters'
