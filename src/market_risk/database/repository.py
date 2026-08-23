@@ -45,10 +45,14 @@ class MarketDataRepository:
 
         if dialect == "sqlite":
             stmt: Any = sqlite_insert(MarketPrice).values(records)
-            stmt = stmt.on_conflict_do_nothing(index_elements=_PRICE_CONFLICT_KEYS)
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=_PRICE_CONFLICT_KEYS
+            )
         elif dialect == "postgresql":
             stmt = pg_insert(MarketPrice).values(records)
-            stmt = stmt.on_conflict_do_nothing(index_elements=_PRICE_CONFLICT_KEYS)
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=_PRICE_CONFLICT_KEYS
+            )
         else:
             new_records = self._filter_existing_prices(records)
             if not new_records:
@@ -65,15 +69,26 @@ class MarketDataRepository:
     def _filter_existing_prices(
         self, records: list[dict[str, object]]
     ) -> list[dict[str, object]]:
-        """Drop records whose (ticker, date) pair is already persisted."""
-        keys = {(r["ticker"], r["date"]) for r in records}
-        existing = set(
-            self.session.execute(
-                select(MarketPrice.ticker, MarketPrice.date).where(
-                    tuple_(MarketPrice.ticker, MarketPrice.date).in_(keys)
+        """Drop records whose (ticker, date) pair is already persisted.
+
+        Queries in chunks of 400 to stay within SQLite's 999-variable limit.
+        """
+        keys = [(r["ticker"], r["date"]) for r in records]
+        existing: set[tuple[object, ...]] = set()
+
+        chunk_size = 400
+        for i in range(0, len(keys), chunk_size):
+            chunk = set(keys[i : i + chunk_size])
+            rows = self.session.execute(
+                select(
+                    MarketPrice.ticker, MarketPrice.date
+                ).where(
+                    tuple_(
+                        MarketPrice.ticker, MarketPrice.date
+                    ).in_(chunk)
                 )
             ).all()
-        )
+            existing.update(rows)
 
         deduped: list[dict[str, object]] = []
         seen: set[tuple[object, object]] = set()
@@ -99,35 +114,76 @@ class MarketDataRepository:
     def save_metrics(self, metrics: ComputedMetric) -> None:
         """Persist metrics, replacing any existing row for the same window.
 
-        Keeps ``computed_metrics`` bounded at one row per
-        (ticker, window_start, window_end) instead of appending on every run.
+        Uses an atomic upsert to avoid TOCTOU races when multiple workers
+        ingest the same ticker concurrently.
         """
-        existing = self.session.scalar(
-            select(ComputedMetric).where(
-                ComputedMetric.ticker == metrics.ticker,
-                ComputedMetric.window_start == metrics.window_start,
-                ComputedMetric.window_end == metrics.window_end,
+        values = {
+            "ticker": metrics.ticker,
+            "computed_at": metrics.computed_at,
+            "window_start": metrics.window_start,
+            "window_end": metrics.window_end,
+            **{f: getattr(metrics, f) for f in _METRIC_FIELDS},
+        }
+
+        dialect = self._dialect
+
+        _conflict_cols = ["ticker", "window_start", "window_end"]
+        _update_keys = ("computed_at", *_METRIC_FIELDS)
+
+        if dialect == "sqlite":
+            stmt: Any = sqlite_insert(ComputedMetric)
+            stmt = stmt.values(values).on_conflict_do_update(
+                index_elements=_conflict_cols,
+                set_={
+                    k: stmt.excluded[k] for k in _update_keys
+                },
             )
-        )
-
-        if existing is None:
-            self.session.add(metrics)
+        elif dialect == "postgresql":
+            stmt = pg_insert(ComputedMetric)
+            stmt = stmt.values(values).on_conflict_do_update(
+                index_elements=_conflict_cols,
+                set_={
+                    k: stmt.excluded[k] for k in _update_keys
+                },
+            )
         else:
-            existing.computed_at = metrics.computed_at
-            for field in _METRIC_FIELDS:
-                setattr(existing, field, getattr(metrics, field))
+            existing = self.session.scalar(
+                select(ComputedMetric).where(
+                    ComputedMetric.ticker == metrics.ticker,
+                    ComputedMetric.window_start == metrics.window_start,
+                    ComputedMetric.window_end == metrics.window_end,
+                )
+            )
+            if existing is None:
+                self.session.add(metrics)
+            else:
+                existing.computed_at = metrics.computed_at
+                for field in _METRIC_FIELDS:
+                    setattr(existing, field, getattr(metrics, field))
+            self.session.commit()
+            return
 
+        self.session.execute(stmt)
         self.session.commit()
 
-    def get_latest_metrics(self, ticker: str) -> ComputedMetric | None:
+    def get_latest_metrics(
+        self, ticker: str
+    ) -> ComputedMetric | None:
         query = (
             select(ComputedMetric)
             .where(ComputedMetric.ticker == ticker)
-            .order_by(ComputedMetric.computed_at.desc(), ComputedMetric.id.desc())
+            .order_by(
+                ComputedMetric.computed_at.desc(),
+                ComputedMetric.id.desc(),
+            )
             .limit(1)
         )
         return self.session.scalar(query)
 
     def list_tickers(self) -> list[str]:
-        query = select(MarketPrice.ticker).distinct().order_by(MarketPrice.ticker)
+        query = (
+            select(MarketPrice.ticker)
+            .distinct()
+            .order_by(MarketPrice.ticker)
+        )
         return list(self.session.scalars(query).all())

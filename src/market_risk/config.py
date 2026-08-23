@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     cache_ttl_seconds: int = 300
 
+    risk_free_rate: float = 0.02
+
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
