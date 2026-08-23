@@ -269,18 +269,21 @@ rolling_metrics_df = (
     .drop("row_num")
 )
 
-rolling_metrics_df.createOrReplaceTempView("rolling_risk_metrics")
-
 spark.sql(f"""
 CREATE OR REPLACE VIEW {full_schema}.v_rolling_metrics AS
 SELECT
     ticker,
     date,
-    daily_return,
     close,
-    rolling_vol_21d,
-    rolling_mean_21d
-FROM rolling_risk_metrics
+    (close / LAG(close, 1) OVER (PARTITION BY ticker ORDER BY date) - 1) AS daily_return,
+    STDDEV(close / LAG(close, 1) OVER (PARTITION BY ticker ORDER BY date) - 1)
+        OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 20 PRECEDING AND CURRENT ROW)
+        * SQRT(252) AS rolling_vol_21d,
+    AVG(close / LAG(close, 1) OVER (PARTITION BY ticker ORDER BY date) - 1)
+        OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 20 PRECEDING AND CURRENT ROW)
+        AS rolling_mean_21d
+FROM {full_schema}.market_prices
+WHERE close > 0
 """)
 
 print("Rolling metrics view created.")
