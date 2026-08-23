@@ -6,8 +6,11 @@ dist/
 build/
 .eggs/
 *.db
-.env*
+.env
+.env.*
+!.env.example
 .venv/
+.venv-*/
 venv/
 .pytest_cache/
 .mypy_cache/
@@ -16,3 +19,13 @@ htmlcov/
 .coverage
 coverage.xml
 uv.lock
+
+# IDE / tool config
+.claude/
+.impeccable/
+.github/agents/
+.github/hooks/
+.github/skills/
+
+# Generated output
+output/
