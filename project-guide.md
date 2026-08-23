@@ -26,6 +26,41 @@ source (S3 / Yahoo / Auto Loader)  ->  Spark validation  ->  Delta Lake (MERGE) 
 
 ---
 
+## Repository Structure
+
+```
+market-risk-pipeline/
+├── src/market_risk/           # Core Python package (FastAPI standalone)
+│   ├── api/                   #   REST API layer (routes, cache, deps)
+│   ├── database/              #   SQLAlchemy models + repository
+│   ├── ingestion/             #   Pluggable data sources
+│   ├── metrics/               #   Risk metric computation
+│   ├── pipeline/              #   Orchestrator + CLI entrypoint
+│   ├── schemas/               #   Pydantic validation & response models
+│   └── config.py              #   Environment-based settings
+├── databricks/                # Databricks-native implementation
+│   ├── config/                #   Delta Lake schema setup
+│   ├── notebooks/             #   Ingestion, metrics, quality checks
+│   ├── sql/                   #   Dashboard queries (15+)
+│   └── workflows/             #   Scheduled DAG definition
+├── spark_exercises/           # PySpark learning exercises (8 levels)
+├── data/
+│   ├── sample/                #   Clean sample OHLCV data
+│   └── dirty/                 #   Intentionally dirty data for Spark exercises
+├── tests/                     # Unit + integration test suite
+│   ├── unit/                  #   Isolated metric/schema/repo tests
+│   └── integration/           #   End-to-end API + pipeline tests
+├── .github/workflows/ci.yml   # GitHub Actions CI pipeline
+├── Dockerfile                 # Multi-stage Docker build
+├── docker-compose.yml         # App + Redis services
+├── pyproject.toml             # Package config, deps, tool settings
+├── Makefile                   # Dev commands (install, test, lint, run)
+├── .env.example               # All configuration variables documented
+└── project-guide.md           # This file
+```
+
+---
+
 ## Architecture
 
 ### Tech Stack
@@ -59,15 +94,15 @@ src/market_risk/
     yahoo_source.py         # Downloads OHLCV per ticker via yfinance
     __init__.py             # get_data_source() factory
   schemas/
-    market_data.py          # MarketDataRow: validation (ticker uppercase, volume >= 0, high >= low)
-    metrics.py              # RiskMetricsResponse, PipelineStatus response models
-    portfolio.py            # PortfolioCreate, PortfolioResponse, PortfolioRiskResponse
+    market_data.py          # MarketDataRow, PricePoint, PriceHistoryResponse
+    metrics.py              # RiskMetricsResponse, ReturnsResponse, RollingMetricsPoint, PipelineStatus
+    portfolio.py            # PortfolioCreate, PortfolioUpdate, PortfolioResponse, PortfolioRiskResponse
   metrics/
     returns.py              # compute_daily_returns (simple pct_change)
     volatility.py           # annualized_volatility, rolling_volatility
     var.py                  # historical_var, parametric_var
     cvar.py                 # conditional_var (expected shortfall)
-    sharpe.py               # sharpe_ratio (annualized, 2% default risk-free rate)
+    sharpe.py               # sharpe_ratio (annualized, configurable risk-free rate)
     drawdown.py             # max_drawdown (peak-to-trough)
     portfolio.py            # compute_portfolio_risk (weighted returns, diversification ratio)
     service.py              # compute_risk_metrics: single source of truth for metric assembly
@@ -75,18 +110,19 @@ src/market_risk/
   database/
     engine.py               # Base, get_engine, get_session_factory
     models.py               # MarketPrice, ComputedMetric, Portfolio, PortfolioHolding
-    repository.py           # MarketDataRepository (upsert_prices, get_prices, save_metrics, etc.)
+    repository.py           # MarketDataRepository (dialect-aware upserts, chunked queries)
   pipeline/
     orchestrator.py         # PipelineOrchestrator.run() + CLI entrypoint (market-risk-ingest)
   api/
-    app.py                  # create_app factory, lifespan (engine + cache init)
+    app.py                  # create_app factory, lifespan, CORS middleware
     deps.py                 # FastAPI dependencies: get_repository, get_cache
     cache.py                # CacheBackend ABC, InMemoryCache, RedisCache, build_cache factory
     routes/
       health.py             # GET /health
       ingest.py             # POST /api/v1/ingest/
-      metrics.py            # GET /api/v1/metrics/tickers, GET /api/v1/metrics/{ticker}
-      portfolio.py          # POST/GET /api/v1/portfolios/, GET /api/v1/portfolios/{name}/risk
+      metrics.py            # GET /metrics/tickers, GET /metrics/{ticker}, /returns, /rolling
+      prices.py             # GET /api/v1/prices/{ticker} (paginated OHLCV history)
+      portfolio.py          # CRUD: POST, GET, PUT, DELETE + GET /portfolios/{name}/risk
 ```
 
 ### Database Schema
@@ -410,9 +446,8 @@ The `spark_exercises/` directory contains PySpark data cleansing exercises unrel
 1. **No Alembic migrations** - Schema changes require manual ALTER or fresh DB
 2. **Synchronous ingestion** - `POST /api/v1/ingest/` blocks the request for large pulls
 3. **No rate limiting on Yahoo** - Fetches one ticker per call with no retry/backoff
-4. **Hardcoded Sharpe risk-free rate** - `sharpe_ratio()` defaults to 0.02 rather than reading from config
-5. **No auth/authorization** - API is completely open
-6. **Single-process cache** - InMemoryCache doesn't share state across workers
+4. **No auth/authorization** - API is completely open
+5. **Single-process cache** - InMemoryCache doesn't share state across workers
 
 ### Databricks
 1. **No Structured Streaming for real-time** - Pipeline is batch-only (scheduled daily)
@@ -442,8 +477,8 @@ make docker-up                 # docker compose up --build (app + Redis)
 # 1. Ingest data
 curl -X POST http://localhost:8000/api/v1/ingest/
 
-# 2. List available tickers
-curl http://localhost:8000/api/v1/metrics/tickers
+# 2. List available tickers (paginated)
+curl "http://localhost:8000/api/v1/metrics/tickers?limit=10&offset=0"
 
 # 3. Get risk metrics for a ticker
 curl http://localhost:8000/api/v1/metrics/AAPL
@@ -451,13 +486,30 @@ curl http://localhost:8000/api/v1/metrics/AAPL
 # 4. Get windowed metrics
 curl "http://localhost:8000/api/v1/metrics/AAPL?start_date=2024-01-02&end_date=2024-01-31"
 
-# 5. Create a portfolio
+# 5. Get price history (for candlestick/line charts)
+curl "http://localhost:8000/api/v1/prices/AAPL?limit=100"
+
+# 6. Get daily returns distribution (for histograms)
+curl http://localhost:8000/api/v1/metrics/AAPL/returns
+
+# 7. Get rolling metrics (for trend charts)
+curl "http://localhost:8000/api/v1/metrics/AAPL/rolling?window=21"
+
+# 8. Create a portfolio
 curl -X POST http://localhost:8000/api/v1/portfolios/ \
   -H "Content-Type: application/json" \
   -d '{"name": "tech", "holdings": [{"ticker": "AAPL", "weight": 0.6}, {"ticker": "MSFT", "weight": 0.4}]}'
 
-# 6. Get portfolio risk
+# 9. Update portfolio holdings
+curl -X PUT http://localhost:8000/api/v1/portfolios/tech \
+  -H "Content-Type: application/json" \
+  -d '{"holdings": [{"ticker": "AAPL", "weight": 0.5}, {"ticker": "MSFT", "weight": 0.3}, {"ticker": "GOOGL", "weight": 0.2}]}'
+
+# 10. Get portfolio risk
 curl http://localhost:8000/api/v1/portfolios/tech/risk
+
+# 11. Delete a portfolio
+curl -X DELETE http://localhost:8000/api/v1/portfolios/tech
 ```
 
 ---
