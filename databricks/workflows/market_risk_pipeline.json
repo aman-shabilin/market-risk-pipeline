@@ -1,0 +1,116 @@
+{
+  "name": "market_risk_daily_pipeline",
+  "description": "Daily market risk pipeline: ingest → quality check → compute metrics",
+  "tags": {
+    "team": "data-engineering",
+    "domain": "market-risk",
+    "env": "production"
+  },
+  "schedule": {
+    "quartz_cron_expression": "0 0 18 ? * MON-FRI",
+    "timezone_id": "America/New_York",
+    "pause_status": "UNPAUSED"
+  },
+  "email_notifications": {
+    "on_failure": ["data-team@company.com"],
+    "on_success": [],
+    "no_alert_for_skipped_runs": true
+  },
+  "max_concurrent_runs": 1,
+  "tasks": [
+    {
+      "task_key": "ingest_market_data",
+      "description": "Ingest OHLCV data from Yahoo Finance into Delta Lake",
+      "notebook_task": {
+        "notebook_path": "/Repos/market-risk-pipeline/databricks/notebooks/01_ingest_market_data",
+        "base_parameters": {
+          "catalog": "market_risk",
+          "schema": "analytics",
+          "source": "yahoo",
+          "tickers": "AAPL,MSFT,GOOGL,AMZN,META,NVDA,TSLA,JPM,V,JNJ",
+          "lookback_days": "365"
+        },
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "pipeline_cluster",
+      "timeout_seconds": 1800,
+      "retry_on_timeout": false,
+      "max_retries": 2,
+      "min_retry_interval_millis": 60000
+    },
+    {
+      "task_key": "data_quality_checks",
+      "description": "Run quality checks on ingested data",
+      "depends_on": [
+        {"task_key": "ingest_market_data"}
+      ],
+      "notebook_task": {
+        "notebook_path": "/Repos/market-risk-pipeline/databricks/notebooks/03_data_quality_checks",
+        "base_parameters": {
+          "catalog": "market_risk",
+          "schema": "analytics",
+          "freshness_threshold_hours": "26",
+          "completeness_lookback_days": "30"
+        },
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "pipeline_cluster",
+      "timeout_seconds": 600,
+      "max_retries": 1
+    },
+    {
+      "task_key": "compute_risk_metrics",
+      "description": "Compute risk metrics for all eligible tickers",
+      "depends_on": [
+        {"task_key": "data_quality_checks"}
+      ],
+      "notebook_task": {
+        "notebook_path": "/Repos/market-risk-pipeline/databricks/notebooks/02_compute_risk_metrics",
+        "base_parameters": {
+          "catalog": "market_risk",
+          "schema": "analytics",
+          "risk_free_rate": "0.02",
+          "min_price_points": "30"
+        },
+        "source": "WORKSPACE"
+      },
+      "job_cluster_key": "pipeline_cluster",
+      "timeout_seconds": 1200,
+      "max_retries": 1
+    }
+  ],
+  "job_clusters": [
+    {
+      "job_cluster_key": "pipeline_cluster",
+      "new_cluster": {
+        "spark_version": "14.3.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 2,
+        "autoscale": {
+          "min_workers": 1,
+          "max_workers": 4
+        },
+        "spark_conf": {
+          "spark.sql.adaptive.enabled": "true",
+          "spark.sql.shuffle.partitions": "auto"
+        },
+        "custom_tags": {
+          "pipeline": "market-risk",
+          "cost_center": "data-eng"
+        },
+        "cluster_log_conf": {
+          "dbfs": {
+            "destination": "dbfs:/cluster-logs/market-risk"
+          }
+        },
+        "runtime_engine": "PHOTON"
+      }
+    }
+  ],
+  "queue": {
+    "enabled": true
+  },
+  "run_as": {
+    "service_principal_name": "market-risk-pipeline-sp"
+  }
+}
