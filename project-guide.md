@@ -350,7 +350,7 @@ databricks/
 | **Pandas UDFs (Grouped Map)** | Scalable per-ticker metric computation distributed across executors |
 | **Window Functions** | Rolling volatility, gap detection, lag-based return computation |
 | **Databricks Workflows** | DAG orchestration: ingest → quality check → metrics (with retries) |
-| **Photon Runtime** | Enabled in cluster config for vectorized query execution |
+| **Serverless Compute** | Workflow runs on serverless (no cluster management, auto-scaling) |
 | **Parameterized Notebooks** | `dbutils.widgets` for configurable runs without code changes |
 | **Pipeline Auditing** | `pipeline_runs` table tracks every execution with status, duration, row counts |
 | **Data Quality Framework** | Scoring system (0-1) across 4 dimensions, stored for trending |
@@ -406,22 +406,35 @@ databricks/
 ```bash
 # 1. Connect Git repo to Databricks Repos
 #    Repos → Add Repo → paste Git URL
+#    Repo path: /Repos/Market Data Analysis/market-risk-pipeline/
 
-# 2. Run schema setup (one-time)
+# 2. Configure Databricks CLI
+#    brew tap databricks/tap && brew install databricks
+#    databricks configure --profile DEFAULT
+#    Host: https://dbc-3302cace-dc1e.cloud.databricks.com
+
+# 3. Run schema setup (one-time)
 #    Open databricks/config/setup_delta_tables.py → Run All
 
-# 3. Create the workflow
-#    Jobs → Create Job → use databricks/workflows/market_risk_pipeline.json as reference
-#    Or use Databricks CLI:
+# 4. Create the workflow (serverless compute)
 #    databricks jobs create --json @databricks/workflows/market_risk_pipeline.json
+#    Note: uses serverless environments with yfinance dependency
 
-# 4. Build the SQL Dashboard
+# 5. Build the SQL Dashboard
 #    SQL Editor → New Query → paste sections from databricks/sql/dashboard_queries.sql
 #    Pin each query to a new Dashboard
 
-# 5. Trigger first run
-#    Jobs → market_risk_daily_pipeline → Run Now
+# 6. Trigger first run
+#    databricks jobs run-now --job-id <JOB_ID>
 ```
+
+### Serverless Compute Notes
+
+- Workspace is serverless-only (no custom job clusters)
+- Dependencies specified via `environments` block in workflow JSON, not `libraries`
+- PySpark RDDs are not supported — use DataFrame `.collect()` instead of `.rdd.flatMap()`
+- Persistent views cannot reference temp views — use source table queries directly
+- Column `DEFAULT` values require `delta.feature.allowColumnDefaults` (removed from DDL)
 
 ---
 

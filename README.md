@@ -1,7 +1,8 @@
 # market-risk-pipeline
 
-Ingests daily OHLCV market data from a pluggable source, computes standard risk
-metrics, and serves them over a REST API.
+A financial risk analytics pipeline with **two deployment targets**: a standalone
+Python/FastAPI service and a Databricks-native implementation using Delta Lake,
+Spark, and SQL Dashboards.
 
 ```
 source (local CSV / S3 / Yahoo)  ->  validate  ->  SQL  ->  metrics  ->  REST + cache
@@ -28,22 +29,30 @@ make docker-up
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/health` | Liveness check. |
-| `GET` | `/api/v1/metrics/tickers` | Tickers with stored price data. |
-| `GET` | `/api/v1/metrics/{ticker}` | Risk metrics for a ticker. |
-| `POST` | `/api/v1/ingest/` | Trigger an ingestion pass. Optional `?ticker=AAPL`. |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/api/v1/metrics/tickers` | Tickers with stored price data (paginated) |
+| `GET` | `/api/v1/metrics/{ticker}` | Risk metrics (precomputed or on-demand with date params) |
+| `GET` | `/api/v1/metrics/{ticker}/returns` | Daily return series + stats |
+| `GET` | `/api/v1/metrics/{ticker}/rolling` | Rolling volatility and VaR time series (`?window=21`) |
+| `GET` | `/api/v1/prices/{ticker}` | Raw OHLCV price history (paginated, date-filterable) |
+| `POST` | `/api/v1/ingest/` | Trigger ingestion pass (optional `?ticker=AAPL`) |
+| `POST` | `/api/v1/portfolios/` | Create a named portfolio with weighted holdings |
+| `GET` | `/api/v1/portfolios/` | List all portfolios (paginated) |
+| `PUT` | `/api/v1/portfolios/{name}` | Update portfolio holdings |
+| `DELETE` | `/api/v1/portfolios/{name}` | Delete a portfolio |
+| `GET` | `/api/v1/portfolios/{name}/risk` | Compute portfolio-level risk metrics |
 
 ### Metrics endpoint
 
-Called without dates, it returns the latest metric set precomputed by the
-pipeline over the ticker's full stored history:
+Called without dates, returns the latest metric set precomputed by the pipeline
+over the ticker's full stored history:
 
 ```bash
 curl localhost:8000/api/v1/metrics/AAPL
 ```
 
 Called with `start_date` and/or `end_date` (ISO `YYYY-MM-DD`, both inclusive),
-metrics are computed on demand from the prices in that window:
+metrics are computed on demand from prices in that window:
 
 ```bash
 curl "localhost:8000/api/v1/metrics/AAPL?start_date=2025-01-01&end_date=2025-06-30"
@@ -68,14 +77,30 @@ curl "localhost:8000/api/v1/metrics/AAPL?start_date=2025-01-01&end_date=2025-06-
 actually present in the window, which may differ from what was requested.
 
 Responses are cached for `MR_CACHE_TTL_SECONDS` per distinct
-`(ticker, start_date, end_date)` key.
+`(ticker, start_date, end_date)` key. CORS is enabled for all origins.
 
 Error responses:
 
 | Status | Condition |
 | --- | --- |
-| `404` | Unknown ticker, or no price data in the requested window. |
-| `422` | Malformed date, `start_date` after `end_date`, or fewer than 3 price points in the window. |
+| `404` | Unknown ticker, or no price data in the requested window |
+| `422` | Malformed date, `start_date` after `end_date`, or fewer than 3 price points |
+
+### Portfolio endpoints
+
+Create a portfolio with weighted holdings (weights are normalized to sum to 1.0):
+
+```bash
+curl -X POST localhost:8000/api/v1/portfolios/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "tech", "holdings": [{"ticker": "AAPL", "weight": 0.6}, {"ticker": "MSFT", "weight": 0.4}]}'
+```
+
+Get portfolio-level risk metrics including diversification ratio:
+
+```bash
+curl localhost:8000/api/v1/portfolios/tech/risk
+```
 
 ## Metrics
 
@@ -85,14 +110,17 @@ magnitudes** — `var_95 = 0.02` means a 2% one-day loss at 95% confidence.
 
 | Metric | Definition |
 | --- | --- |
-| `annualized_volatility` | Standard deviation of daily returns × √252. |
-| `var_95` / `var_99` | Historical Value-at-Risk: the loss at the 5th / 1st return percentile. |
-| `cvar_95` / `cvar_99` | Conditional VaR (expected shortfall): mean loss in the tail beyond VaR. Always ≥ the matching VaR. |
-| `sharpe_ratio` | Annualized mean excess return over standard deviation, at a 2% risk-free rate. |
-| `max_drawdown` | Largest peak-to-trough decline, as a positive fraction. |
+| `annualized_volatility` | Standard deviation of daily returns x sqrt(252) |
+| `var_95` / `var_99` | Historical Value-at-Risk: the loss at the 5th / 1st return percentile |
+| `cvar_95` / `cvar_99` | Conditional VaR (expected shortfall): mean loss in the tail beyond VaR |
+| `sharpe_ratio` | Annualized mean excess return over standard deviation (configurable risk-free rate, default 2%) |
+| `max_drawdown` | Largest peak-to-trough decline, as a positive fraction |
 
-`parametric_var` (normal-distribution VaR) is also available in
-`market_risk.metrics` but is not part of the persisted metric set.
+Portfolio-level metrics additionally include:
+
+| Metric | Definition |
+| --- | --- |
+| `diversification_ratio` | Weighted average individual volatility / portfolio volatility (>1 means diversification benefit) |
 
 A window needs at least 3 price points. Any window producing a non-finite value
 is rejected rather than persisted or served.
@@ -104,17 +132,18 @@ All settings are read from environment variables prefixed `MR_`, or from a
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `MR_DATABASE_URL` | `sqlite:///./market_risk.db` | Any SQLAlchemy URL. |
-| `MR_DATA_SOURCE` | `local` | One of `local`, `s3`, `yahoo`. Invalid values fail at startup. |
-| `MR_LOCAL_DATA_PATH` | `./data/sample` | Directory of CSVs, for `local`. |
-| `MR_S3_BUCKET` | — | For `s3`. |
-| `MR_S3_PREFIX` | `market-data/` | For `s3`. |
-| `MR_AWS_REGION` | `us-east-1` | For `s3`. |
-| `MR_YAHOO_TICKERS` | `AAPL,MSFT,GOOGL` | Comma-separated, for `yahoo`. |
-| `MR_YAHOO_PERIOD_DAYS` | `365` | Lookback window, for `yahoo`. |
-| `MR_REDIS_URL` | — | Empty uses an in-process cache instead. |
-| `MR_CACHE_TTL_SECONDS` | `300` | Metrics response TTL. |
-| `MR_API_HOST` / `MR_API_PORT` | `0.0.0.0` / `8000` | |
+| `MR_DATABASE_URL` | `sqlite:///./market_risk.db` | Any SQLAlchemy URL |
+| `MR_DATA_SOURCE` | `local` | One of `local`, `s3`, `yahoo` |
+| `MR_LOCAL_DATA_PATH` | `./data/sample` | Directory of CSVs, for `local` |
+| `MR_S3_BUCKET` | — | For `s3` |
+| `MR_S3_PREFIX` | `market-data/` | For `s3` |
+| `MR_AWS_REGION` | `us-east-1` | For `s3` |
+| `MR_YAHOO_TICKERS` | `AAPL,MSFT,GOOGL` | Comma-separated, for `yahoo` |
+| `MR_YAHOO_PERIOD_DAYS` | `365` | Lookback window, for `yahoo` |
+| `MR_REDIS_URL` | — | Empty uses an in-process cache instead |
+| `MR_CACHE_TTL_SECONDS` | `300` | Metrics response TTL |
+| `MR_RISK_FREE_RATE` | `0.02` | Annualized risk-free rate for Sharpe ratio |
+| `MR_API_HOST` / `MR_API_PORT` | `0.0.0.0` / `8000` | Server bind |
 
 ## Data sources
 
@@ -128,7 +157,7 @@ selected at runtime by `MR_DATA_SOURCE`:
 Expected CSV columns: `ticker,date,open,high,low,close,volume`.
 
 Rows are validated with Pydantic before insertion — tickers are upper-cased,
-volume must be non-negative, and `high` must be ≥ `low`. Invalid rows are
+volume must be non-negative, and `high` must be >= `low`. Invalid rows are
 counted and skipped rather than failing the batch; the count is returned as
 `errors` from the ingest endpoint.
 
@@ -150,7 +179,7 @@ the precomputed pipeline path and the on-demand API path cannot drift apart.
 
 ## Storage
 
-Two tables:
+Four tables:
 
 - **`market_prices`** — unique on `(ticker, date)`, so re-ingesting overlapping
   data is idempotent. Insertion uses native `ON CONFLICT DO NOTHING` on SQLite
@@ -159,10 +188,36 @@ Two tables:
 - **`computed_metrics`** — unique on `(ticker, window_start, window_end)`.
   Re-running the pipeline updates the existing row for a window rather than
   appending, so the table stays bounded.
+- **`portfolios`** — unique on `name`. Has many `portfolio_holdings`.
+- **`portfolio_holdings`** — unique on `(portfolio_id, ticker)`. Stores the
+  weight of each ticker in a portfolio.
 
 Schema is created via `Base.metadata.create_all` at startup. There are no
 migrations yet, so changing a model against an existing database needs a manual
 `ALTER` or a fresh database file.
+
+## Databricks deployment
+
+The `databricks/` directory contains a full Databricks-native implementation
+designed for production-scale runs on Delta Lake with serverless compute.
+
+```
+databricks/
+├── config/setup_delta_tables.py          # Unity Catalog schema + Delta table DDL
+├── notebooks/
+│   ├── 01_ingest_market_data.py          # Multi-source ingestion into Delta Lake
+│   ├── 02_compute_risk_metrics.py        # Risk metrics via Pandas UDFs
+│   └── 03_data_quality_checks.py         # Freshness, completeness, outlier, gap checks
+├── sql/dashboard_queries.sql             # 15+ queries for SQL Dashboard
+└── workflows/market_risk_pipeline.json   # Scheduled DAG (ingest -> quality -> metrics)
+```
+
+Key features: Delta MERGE upserts, liquid clustering, Pandas UDFs for scalable
+per-ticker computation, pipeline run auditing, data quality scoring, Auto Loader
+for incremental ingestion, and a SQL Dashboard with 15+ pre-built queries.
+
+Runs on serverless compute (no cluster management). See `project-guide.md` for
+full deployment instructions and feature details.
 
 ## Development
 
@@ -180,7 +235,13 @@ your local config.
 
 ## Known gaps
 
-- No Alembic migrations.
-- `POST /api/v1/ingest/` runs synchronously; a large Yahoo or S3 pull will block the request.
+### Standalone
+- No Alembic migrations — schema changes require manual ALTER or fresh DB.
+- `POST /api/v1/ingest/` runs synchronously; a large Yahoo or S3 pull blocks the request.
 - Yahoo ingestion fetches one ticker per call with no rate limiting or retry.
-- `sharpe_ratio` hardcodes a 2% risk-free rate.
+- No auth/authorization — API is completely open.
+- In-memory cache doesn't share state across workers.
+
+### Databricks
+- Batch-only (no Structured Streaming for real-time).
+- Dashboard requires manual setup (no Terraform/API automation yet).
