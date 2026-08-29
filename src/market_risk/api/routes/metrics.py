@@ -6,8 +6,8 @@ from market_risk.api.cache import CacheBackend
 from market_risk.api.deps import get_cache, get_repository
 from market_risk.database.repository import MarketDataRepository
 from market_risk.metrics import MIN_PRICE_POINTS, compute_daily_returns, compute_risk_metrics
-from market_risk.metrics.volatility import TRADING_DAYS_PER_YEAR, rolling_volatility
 from market_risk.metrics.var import historical_var
+from market_risk.metrics.volatility import rolling_volatility
 from market_risk.schemas.metrics import ReturnsResponse, RiskMetricsResponse, RollingMetricsPoint
 
 router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"])

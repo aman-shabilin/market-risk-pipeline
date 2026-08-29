@@ -57,7 +57,11 @@ def compute_portfolio_risk(
 
     mean_return = float(np.mean(portfolio_returns))
     std_return = float(np.std(portfolio_returns, ddof=1))
-    sharpe = ((mean_return - risk_free_rate / 252) / std_return * np.sqrt(252)) if std_return > 0 else 0.0
+    if std_return > 0:
+        excess_return = mean_return - risk_free_rate / 252
+        sharpe = excess_return / std_return * np.sqrt(252)
+    else:
+        sharpe = 0.0
 
     cumulative = np.cumprod(1 + portfolio_returns)
     running_max = np.maximum.accumulate(cumulative)

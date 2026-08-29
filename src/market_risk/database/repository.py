@@ -88,7 +88,7 @@ class MarketDataRepository:
                     ).in_(chunk)
                 )
             ).all()
-            existing.update(rows)
+            existing.update(tuple(row) for row in rows)
 
         deduped: list[dict[str, object]] = []
         seen: set[tuple[object, object]] = set()

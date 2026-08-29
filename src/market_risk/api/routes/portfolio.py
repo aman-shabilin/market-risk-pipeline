@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import delete as sql_delete, select
+from sqlalchemy import delete as sql_delete
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -31,7 +32,7 @@ def create_portfolio(
     total_weight = sum(h.weight for h in body.holdings)
     portfolio = Portfolio(
         name=body.name,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         holdings=[
             PortfolioHolding(
                 ticker=h.ticker, weight=h.weight / total_weight
