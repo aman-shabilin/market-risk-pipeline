@@ -31,15 +31,29 @@ source (S3 / Yahoo / Auto Loader)  ->  Spark validation  ->  Delta Lake (MERGE) 
 **Read this section first.** It is the handover point for a new session. Last
 updated 2026-08-30. Items 4, 5 and 6 are merged into `main` (PR #1, merge commit
 `445dfd3`), followed by four fixes that *executing* the item 6 runbook forced out
-— PRs #3, #4, #5 and #6, with `main` now at `c5d6812`. Each closed a gap between
-what this document asserted and what a real workspace does: a step described as
-idempotent that aborted on a second run (#3), an undocumented dependency step
-(#4), a fix built on an API serverless rejects (#5), and a reaper inventing
-timestamps (#6). Worth knowing before trusting the parts not yet executed.
+— PRs #3, #4, #5 and #6, then a documentation correction (#7), with `main` now at
+`2d4b1cf`. Each closed a gap between what this document asserted and what a real
+workspace does: a step described as idempotent that aborted on a second run (#3),
+an undocumented dependency step (#4), a fix built on an API serverless rejects
+(#5), and a reaper inventing timestamps (#6). Worth knowing before trusting the
+parts not yet executed.
 
-What remains on item 6 is running the backfill itself. Steps 1 and 2 of its
-runbook are done; step 3 has been attempted and produced the wrong data. See
-*Item 6 in detail* for the runbook and exactly where it stands.
+**The item 6 backfill has landed, and so has the whole notebook chain.** Runbook
+steps 1-3b are done: `market_prices` holds 2,317,950 rows across 503 tickers,
+2006-09-05 → 2026-08-28, written by a single 2m03s ingest run with
+`rows_failed = 0`, and `02`/`03` have since run against that volume — the
+dashboard shows 503 tickers in `computed_metrics` and 503 × 4 rows in
+`data_quality_scores`. What remains is the job end-to-end (step 4) and the
+timings.
+
+**But executing it surfaced a new gap, and it is the same gap as always: the
+live dashboard is still running the pre-item-6 queries.** Item 6 rewrote every
+tile in `databricks/sql/dashboard_queries.sql` to be bounded; none of that
+reached the actual dashboard, because pointing widgets at new SQL is a manual
+step nobody had written down. Three tiles are also independently misconfigured,
+and one quality check turns out not to discriminate at 20-year scale. See
+*Item 6 in detail → What the dashboard actually shows* before capturing any
+screenshot, and note that this blocks item 3.
 
 The project is being worked through a **portfolio-readiness plan**: the code was
 already sound, but the repository did not *present* as sound to someone spending
@@ -56,10 +70,13 @@ by technical interest.
 | `mypy src/` (strict) | clean |
 | GitHub Actions CI | **green** on `main` |
 | Repo | public, `github.com/aman-shabilin/market-risk-pipeline` |
-| Databricks | job runs daily on schedule; last observed run 3m42s, 62,234 rows read / 7,576 written |
-| `market_prices` | 24,968 rows, 10 tickers, 2006-09-05 → 2026-08-28 — item 6's backfill has **not** landed |
+| Databricks | job runs daily on schedule; last observed *pre-backfill* run 3m42s, 62,234 rows read / 7,576 written. **Not yet re-run since the backfill** |
+| `market_prices` | **2,317,950 rows, 503 tickers, 2006-09-05 → 2026-08-28** — item 6's backfill landed 2026-08-30 |
 | `ticker_universe` | 503 rows, 503 active — seeded and verified |
-| `pipeline_runs` | audit table repaired 2026-08-30; longest genuine (`succeeded`) task 123s |
+| `computed_metrics` | recomputed at scale — 503 tickers present |
+| `data_quality_scores` | rescored at scale — 503 tickers × 4 checks. `outliers` is **not discriminating**: 140+ tickers tie at 0.30 |
+| SQL dashboard | **stale — still running the pre-item-6 queries.** Not capture-ready |
+| `pipeline_runs` | audit table repaired 2026-08-30; longest genuine (`succeeded`) task 123s — the backfill ingest itself |
 
 ### Working conventions
 
@@ -92,7 +109,7 @@ by technical interest.
 | 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
 | 4 | Split `spark_exercises/` into its own repository | **done** — `9c10679`, `0963bcf` |
 | 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** — `d7e9314` |
-| 6 | Backfill a realistic data volume and publish timings | **code done + 4 fixes merged; backfill still to run** — `2909697`, PRs #3-#6 |
+| 6 | Backfill a realistic data volume and publish timings | **notebooks all done at scale (2.32M rows); stale dashboard + timings outstanding** — `2909697`, PRs #3-#6 |
 | 7 | Add a dbt or Airflow layer | **not started — next** |
 
 Items 1-3 existed because a public repo with a red CI badge and no visual
@@ -108,6 +125,18 @@ reference already exists in `README.md` but is commented out, so nothing renders
 broken meanwhile. See `docs/CAPTURE_CHECKLIST.md` for the procedure and two
 known nits (a `Sum of ...` axis label on the volatility chart, and the account
 email visible in the run-history capture).
+
+Item 3 now depends on item 6 rather than being independent of it: every existing
+capture was taken pre-backfill and shows the 10-ticker world, and the missing
+heatmap needs `03` to have scored 503 tickers before it has anything to show. `03`
+has now run, but **do not capture yet** — the dashboard is still on the pre-item-6
+queries, so the heatmap currently renders 503 one-pixel stripes and the volatility
+chart a 503-line band. Capturing now would publish that to a public README.
+
+Order: runbook step 3c (re-point the dashboard), then step 4 (job end-to-end), then
+re-capture the whole set in one sitting — not just the missing fifth. The
+screenshots are the part of the repo a reader sees first, and every one of them
+currently undersells the volume the pipeline handles.
 
 ### Where item 4 landed
 
@@ -164,6 +193,7 @@ proves nothing. Check for a `metrics` row with `started_at` after
 **Why it mattered.** The pipeline read ~62k rows per run across 10 tickers. That
 is a laptop-sized problem, which undercuts the Delta MERGE / liquid clustering /
 grouped-map framing — distributing that work was not yet justified by the data.
+As of the 2026-08-30 backfill it is: 2,317,950 rows across 503 tickers.
 
 **Chosen scale: the S&P 500 over 20 years** — ~503 symbols, ~2.5M price rows,
 ~503 `applyInPandas` groups. Two caveats that belong in any writeup:
@@ -181,13 +211,20 @@ grouped-map framing — distributing that work was not yet justified by the data
 |----------|-------|
 | `setup_delta_tables` | run clean, re-runnable since PR #3 |
 | `seed_ticker_universe` | run clean — 503 rows, 503 active |
-| `01_ingest_market_data` | ran and **succeeded** post-PR #5, but with the wrong parameters — see the widget trap in step 3 |
-| `02_compute_risk_metrics` | **not re-run since PR #5** |
-| `03_data_quality_checks` | **not re-run since PR #5** |
+| `01_ingest_market_data` | **backfill succeeded** 2026-08-30 11:38 UTC — 2m03s, 2,317,950 rows, 0 failed, `ticker_source=table`, 503 tickers. Four earlier attempts failed first: three on the widget trap below, one on the missing `yfinance` of step 3 |
+| `02_compute_risk_metrics` | **ran at scale** — `computed_metrics` carries all 503 tickers |
+| `03_data_quality_checks` | **ran at scale** — 503 tickers × 4 checks, but `outliers` does not discriminate (see below) |
 
-So the serverless-compatible version of `01` is exercised; `02` and `03` are still
-only `py_compile`-and-read, verified the same way as before plus a lint comparison
-against the previous commit.
+All three notebooks are now exercised at target scale, so nothing on item 6 rests
+on `py_compile`-and-read any more. What that execution exposed is one layer out
+from the notebooks: the SQL dashboard reading these tables was never re-pointed at
+item 6's rewritten queries. See *What the dashboard actually shows*.
+
+**On the row count.** 2,317,950 rather than the ~2.5M estimated above is correct,
+not a shortfall. 503 × 20 years × ~252 trading days is the ceiling only if every
+current constituent traded in 2006; many were listed later. `rows_failed = 0` with
+no skipped-chunk warnings is the evidence that nothing was dropped — check that
+before reading a gap into the total.
 
 **What the scale change actually required.** The interesting part was not the
 volume, it was that 503 tickers and 20 years broke assumptions that 10 tickers
@@ -245,8 +282,9 @@ and 30 days had hidden:
    600→1800, metrics 1200→2400) and the ingest task now passes
    `ticker_source=table`.
 
-**The backfill runbook.** Steps 1 and 2 are **done**; step 3 is the outstanding
-work. Every `# DONE` / `# TODO` marker below reflects the state on 2026-08-30.
+**The backfill runbook.** Steps 1-3 are **done**; steps 3b and 4 are the
+outstanding work. Every `# DONE` / `# TODO` marker below reflects the state on
+2026-08-30.
 
 ```bash
 # 1. DONE -- Create the new table (idempotent; re-running setup is safe)
@@ -263,7 +301,10 @@ work. Every `# DONE` / `# TODO` marker below reflects the state on 2026-08-30.
 #    *before* the MERGE, so it only proves the list is intact. Confirm the table
 #    itself: SELECT COUNT(*), SUM(active::int) FROM ...ticker_universe
 
-# 3. TODO -- One-off backfill: run the ingest notebook alone, not the job
+# 3. DONE -- One-off backfill: run the ingest notebook alone, not the job
+#    Landed 2026-08-30 11:38 UTC: 2m03s, 2,317,950 rows, 0 failed, 503 tickers.
+#    Took five attempts; the four failures are still in pipeline_runs and are
+#    worth reading as a worked example of both traps below.
 #    FIRST: add yfinance to the notebook's Environment panel and Apply.
 #    yfinance is declared in the job's serverless environment (see "Serverless
 #    dependencies" below), which an interactive run does not inherit -- without
@@ -277,7 +318,29 @@ work. Every `# DONE` / `# TODO` marker below reflects the state on 2026-08-30.
 #    table". If it says "from widget", the dropdown did not take -- fix it and
 #    re-run that cell rather than trusting the panel.
 
+# 3b. DONE -- Run 02 then 03 interactively against the backfilled table, in that
+#    order (03's freshness and completeness checks read what 02 produced).
+#    These have not executed since PR #5, so this is the first time the trailing
+#    metrics window and the scoped/bounded quality checks meet 20-year data.
+#    02: metrics_window_days = 365 (default). Watch for the applyInPandas stage
+#        fanning out to ~503 groups rather than 10, and confirm window_start is
+#        ~365 days back from the table's MAX(date), not 2006.
+#    03: restrict_to_active_universe = true, history_lookback_days = 180
+#        (both defaults). Expect scores that discriminate; if every ticker lands
+#        on the same score the bound is not doing its job.
+#    Both need yfinance? No -- only 01 fetches. But both still need to be run
+#    interactively, and an interactive run inherits no job environment.
+
+# 3c. TODO -- Re-point the dashboard widgets at databricks/sql/dashboard_queries.sql
+#    NOT optional, and not previously in this runbook. Editing the .sql file in the
+#    repo does nothing to a live dashboard -- the widgets keep whatever query they
+#    were built with. Every bound item 6 added is currently absent from the live
+#    tiles. See "What the dashboard actually shows" below for the tile-by-tile list.
+
 # 4. TODO -- Then run the job normally; lookback_days=30 keeps it incremental
+#    This is also the only like-for-like timing comparison: the 3m42s baseline is
+#    a whole-job, three-task figure, so it cannot be compared against the 2m03s
+#    ingest-only backfill above.
 databricks jobs run-now --job-id <JOB_ID>
 ```
 
@@ -302,15 +365,85 @@ run that silently does the wrong thing is indistinguishable from a correct one
 until you can read back what it was asked to do. The `Tickers: N from <source>`
 line in the first cell exists for the same reason — check it before Run All.
 
-**Timings to publish once it has run.** Before: 3m42s, 62,234 rows read / 7,576
-written, 10 tickers. After: _pending_ — record wall-clock per task, rows read and
-written, and `computed_metrics` row count. The comparison is the deliverable of
-item 6; the code change is only what makes it possible.
+### What the dashboard actually shows (observed 2026-08-30, post-`02`/`03`)
 
-Read those durations from `pipeline_runs` rows with `status = 'succeeded'` only.
-A `failed` row's `finished_at` was written by the reaper, not by the run itself,
-so its duration is the interval to the *next* run's start — plausible-looking and
-meaningless. See *Design Decisions → Databricks → 5*.
+`02` and `03` have run at target scale, so the tables are right. **The dashboard
+is not.** Every bounding change from *What the scale change actually required*
+item 6 exists in `databricks/sql/dashboard_queries.sql` and none of it is live,
+because re-pointing a widget at edited SQL is a manual step that was never
+recorded. This is the widget trap one level up: the repository asserts a shape the
+workspace does not have, and nothing errors.
+
+| Tile | `dashboard_queries.sql` specifies | Live tile shows |
+|---|---|---|
+| Rolling Volatility Over Time | 11 sector medians, `GROUP BY u.sector, m.date`, plus a `:ticker` drilldown | ~503 per-ticker lines as an opaque band, with a `Render more data` truncation banner |
+| Return Distribution | `LIMIT 25` | ~503 ticker bars |
+| Daily Ingestion Volume | totalled, `GROUP BY DATE(ingested_at)` | split into 503 per-ticker series |
+| Overall Quality Score by Ticker | the 40 weakest tickers | all 503, each ~1px tall |
+
+The heatmap is the one worth dwelling on. "2,000 cells reads as wallpaper" was
+written into this document as a *prediction* justifying the `LIMIT 40`; the live
+tile is now a photograph of that prediction. The bound was correct and simply
+never applied.
+
+Both axis labels also read `Sum of ...` (`Sum of rolling_vol_pct`, `Sum of
+return_pct`) — the nit already logged in `docs/CAPTURE_CHECKLIST.md`. Summing a
+volatility across tickers is meaningless; the aggregation wants to be a median or
+none at all.
+
+**Three tiles are misconfigured rather than unbounded.** All three counters in the
+Operations header are fed from the single *Pipeline Success Rate* query, which
+returns `success_rate_pct, total_runs, failed_runs`:
+
+| Tile | Shows | Diagnosis |
+|---|---|---|
+| Pipeline Success Rate | `60%` | correct — `success_rate_pct`, i.e. 27 of 45 runs over 7 days |
+| Failed Runs | `1,800%` | `failed_runs = 18` with percent formatting wrongly applied |
+| Last Run Status | `60%` | bound to `success_rate_pct` again. The spec makes this a **Table** over a different query, not a counter — wrong widget type *and* wrong query |
+
+*Quality Trend Over Time* additionally **stacks** four `avg_score` series, summing
+a 0-1 score to ~3.2. Averages do not stack; that tile wants grouped bars.
+
+**A real finding about the check itself, not the dashboard.** *Tickers Needing
+Attention* returns 18 pages of tickers at exactly `0.30`, and `outliers` is the
+only red column in the heatmap. Item 6 wrote the acceptance test for this in the
+step 3b runbook note — "if every ticker lands on the same score the bound is not
+doing its job" — and it fails it. `history_lookback_days = 180` bounds the window
+but does not separate 500 symbols; a floor that 140+ tickers tie on ranks nothing.
+Worth treating as its own item rather than folding into the dashboard fix.
+
+**This blocks item 3.** Capturing `05-quality-scorecard.png` from the dashboard in
+its current state would publish the wallpaper failure to a public README. Fix the
+dashboard, run step 4, then capture.
+
+**Timings to publish.** The comparison is the deliverable of item 6; the code
+change is only what makes it possible.
+
+| | Before | After |
+|---|---|---|
+| Tickers | 10 | **503** |
+| `market_prices` rows | 24,968 | **2,317,950** |
+| Backfill ingest, standalone | n/a | **2m03s**, 2,317,950 rows, 0 failed |
+| Whole job, 3 tasks | 3m42s | _pending step 4_ |
+| Rows read / written per job run | 62,234 / 7,576 | _pending step 4_ |
+| `computed_metrics` rows | — | 503 tickers present; exact count **still to be read** |
+| `02` / `03` wall-clock | part of the 3m42s | _pending step 4_ — not captured from the interactive runs |
+
+Do not compare the 2m03s standalone ingest against the 3m42s baseline: that
+baseline is a whole-job figure covering ingest, metrics and quality. Step 4 is what
+produces the comparable number.
+
+Note also that `pipeline_runs` records `rows_processed` / `rows_failed`, not rows
+read and written. The read/written pair quoted in `README.md` came from the job run
+page's query metrics, so take the "after" figures from the same place to keep the
+comparison like-for-like.
+
+Read durations from `pipeline_runs` rows with `status = 'succeeded'` only. A
+`failed` row's `finished_at` was written by the reaper, not by the run itself, so
+its duration is the interval to the *next* run's start — plausible-looking and
+meaningless. The four failed attempts preceding the backfill are exactly this
+shape: all four carry `finished_at` NULL, which is the reaper's signature and the
+intended behaviour since PR #6. See *Design Decisions → Databricks → 5*.
 
 ### Confidentiality constraint on screenshots
 
@@ -830,11 +963,13 @@ repository with it made both look less deliberate than they are.
 3. **No MLflow integration** - Could version metric models and track drift
 4. **Dashboard requires manual setup** - SQL queries need to be imported manually (no Terraform/API automation yet)
 5. **Runs as a user, not a service principal** - The job's `run_as` is the creating user. A service principal would give a non-human audit identity and least-privilege access
-6. **Data volume is small until the backfill runs** - Still ~62k rows read per run across 10 tickers on the deployed job. The code for the S&P 500 × 20-year universe is in place but the backfill has not been executed — see *Current Status and Roadmap → Item 6 in detail* for the runbook
+6. **The deployed job has not yet run at the new volume** - The backfill landed 2026-08-30 and `market_prices` now holds 2,317,950 rows across 503 tickers, but that was a standalone ingest run. The scheduled three-task job has not executed since, so the last observed job figures (3m42s, ~62k rows read) still describe the 10-ticker world, and `computed_metrics` / `data_quality_scores` have not been recomputed at scale — see *Current Status and Roadmap → Item 6 in detail*
 7. **`v_rolling_metrics` recomputes returns on every query** - The view derives daily returns with `LAG` at read time rather than reading the persisted values. At 2.5M rows this is the most expensive thing the dashboard does; materializing it would cut latency at the cost of another table to keep fresh
 8. **`computed_metrics` grows unboundedly** - One row per ticker per `(window_start, window_end)`, and a trailing window advances both bounds daily, so a weekday schedule adds ~503 rows a day (~130k/year) forever. That snapshot history is intentional — it is what makes risk trends queryable — but there is no retention policy, and every read has to filter to the latest window with `QUALIFY`. A `VACUUM`/retention plan or a partition on `window_end` is the missing piece
 9. **Survivorship bias in the ticker universe** - The seed list is today's S&P 500 membership backfilled 20 years, so any aggregate return computed from it is flattered. Acceptable for exercising the pipeline; wrong for claims about the market. Fixing it needs a point-in-time constituent source
 10. **No trading calendar** - Completeness and gap checks approximate expected trading days as weekdays (`days * 5/7`) and treat gaps over 3-5 days as suspicious. Real holidays therefore cost score. A proper exchange calendar would make both checks exact
+11. **The outliers check does not discriminate at 500-symbol scale** - Observed 2026-08-30, after `03` first ran over the backfill: 140+ tickers tie at exactly `0.30`, so *Tickers Needing Attention* ranks nothing and returns 18 pages of identical scores. `history_lookback_days` (default 180) bounds the window, which was the item 6 fix, but bounding is not the same as separating — the score needs to be relative (a z-score against the symbol's own history, or a percentile across the universe) rather than an absolute rate that saturates. This is the one item 6 finding that is about a check rather than a document or a widget
+12. **Dashboard widgets are not version-controlled with their SQL** - `databricks/sql/dashboard_queries.sql` is the intended source of truth, but a live widget keeps whatever query it was created with, so editing the file changes nothing until someone re-points each tile by hand. Item 6 rewrote every tile and none of it reached the dashboard, unnoticed, because there is no drift check. This is what limitation "Dashboard requires manual setup" costs in practice; a Terraform/API-defined dashboard would make the file authoritative
 
 ---
 

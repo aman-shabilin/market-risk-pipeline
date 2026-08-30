@@ -348,9 +348,16 @@ your local config.
 - Batch-only (no Structured Streaming for real-time).
 - Dashboard requires manual setup (no Terraform/API automation yet).
 - The job runs as the creating user rather than a service principal.
-- ~62k rows read per run across 10 tickers — a volume that does not yet justify the
-  distributed machinery. The code for an S&P 500 × 20-year universe (~2.5M rows) is
-  in place behind the `ticker_universe` table; the backfill has not been run yet.
+- The S&P 500 × 20-year backfill has landed — 2.32M price rows across 503 tickers,
+  behind the `ticker_universe` table — but the scheduled job has not yet run at that
+  volume, so the run figures and screenshots above still show the earlier 10-ticker
+  scale.
+- Dashboard widgets are not version-controlled alongside `databricks/sql/dashboard_queries.sql`:
+  a live tile keeps the query it was built with, so the file is the intended source of
+  truth without being authoritative. The tiles currently lag it.
+- The outlier quality check saturates across a 500-symbol universe — a large share of
+  tickers tie on the same score, so it flags a set rather than ranking it. It needs to
+  be relative (z-score or percentile) rather than an absolute rate.
 - The ticker universe is today's index membership, so any aggregate return computed
   from a 20-year backfill of it carries survivorship bias.
 - No exchange trading calendar: the completeness and gap checks approximate trading
