@@ -54,8 +54,11 @@ by technical interest.
   commands as `.venv-1/bin/python -m ...`.
 - **CI must stay green.** It runs exactly three gates: `pytest --cov`,
   `ruff check src/ tests/`, `mypy src/`. Note the lint gate covers only `src/`
-  and `tests/` — `databricks/` and `spark_exercises/` sit outside it and
-  currently carry ~146 ruff violations, which is why they do not break CI.
+  and `tests/` — `databricks/` sits outside it and carries ~132 ruff violations,
+  which is why they do not break CI. Nearly all are `F821` on the notebook
+  globals `spark`, `dbutils` and `display`, plus `E402` on the per-cell imports;
+  both are inherent to the notebook format rather than real defects. Bringing
+  `databricks/` under the gate would mean configuring those away first.
 - **Commit messages carry no `Co-Authored-By` trailer.**
 - Work happens directly on `main` (solo project, no PR flow).
 - Notebook changes cannot be covered by the test suite; verify them with
@@ -68,9 +71,9 @@ by technical interest.
 | 1 | Fix the failing CI (5 ruff errors, 1 mypy error) | **done** — `fbca5ef` |
 | 2 | Mermaid architecture diagram + screenshot scaffolding | **done** — `3b7dc04` |
 | 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
-| 4 | Split `spark_exercises/` into its own repository | **not started — next** |
+| 4 | Split `spark_exercises/` into its own repository | **done locally — remote not yet created** |
 | 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** |
-| 6 | Backfill a realistic data volume and publish timings | **not started** |
+| 6 | Backfill a realistic data volume and publish timings | **not started — next** |
 | 7 | Add a dbt or Airflow layer | **not started** |
 
 Items 1-3 existed because a public repo with a red CI badge and no visual
@@ -86,6 +89,25 @@ reference already exists in `README.md` but is commented out, so nothing renders
 broken meanwhile. See `docs/CAPTURE_CHECKLIST.md` for the procedure and two
 known nits (a `Sum of ...` axis label on the volatility chart, and the account
 email visible in the run-history capture).
+
+### Outstanding on item 4
+
+The exercises now live in a standalone git repository at
+`/Users/SHAMA029/spark-exercises` (branch `main`, one commit) and are deleted from
+this repo along with `data/dirty/`, which only they used. The new repo carries its
+own README, a ruff config that ignores `N812` for the `functions as F` idiom, and
+a lint + compile CI; it lints clean.
+
+**The GitHub remote does not exist yet** — creating a public repository is an
+outward-facing step left to the owner:
+
+```bash
+gh repo create spark-exercises --public --source /Users/SHAMA029/spark-exercises \
+  --description "PySpark data cleansing exercises, eight progressive levels" --push
+```
+
+Until that runs, the new repo's README links to `market-risk-pipeline` but nothing
+links back. Once it exists, consider a one-line pointer from this repo's README.
 
 ### Item 5 in detail — what changed
 
@@ -156,10 +178,8 @@ market-risk-pipeline/
 │   ├── notebooks/             #   Ingestion, metrics, quality checks
 │   ├── sql/                   #   Dashboard queries (15+)
 │   └── workflows/             #   Scheduled DAG definition
-├── spark_exercises/           # PySpark learning exercises (8 levels)
 ├── data/
-│   ├── sample/                #   Clean sample OHLCV data
-│   └── dirty/                 #   Intentionally dirty data for Spark exercises
+│   └── sample/                #   Clean sample OHLCV data
 ├── tests/                     # Unit + integration test suite
 │   ├── unit/                  #   Isolated metric/schema/repo tests
 │   └── integration/           #   End-to-end API + pipeline tests
@@ -554,18 +574,13 @@ databricks/
 
 ---
 
-## Spark Exercises (Supplementary)
+## Spark Exercises (Moved Out)
 
-The `spark_exercises/` directory contains PySpark data cleansing exercises unrelated to the main pipeline. These are 8 progressive levels teaching DataFrame transformations on intentionally dirty market data (`data/dirty/market_data_dirty.csv`):
-
-1. Read & inspect
-2. Standardization (case, trim, types)
-3. Null handling
-4. Filtering invalid records
-5. Deduplication
-6. Derived columns & window functions
-7. Aggregations & joins
-8. Full pipeline (chain everything)
+The eight PySpark data cleansing exercises that used to live in `spark_exercises/`,
+along with the intentionally dirty CSV they read (`data/dirty/`), now live in their
+own repository — see *Current Status and Roadmap → Outstanding on item 4*. They
+were teaching material with no connection to the pipeline code, and sharing a
+repository with it made both look less deliberate than they are.
 
 ---
 
