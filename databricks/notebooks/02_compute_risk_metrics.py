@@ -60,8 +60,8 @@ run_start = datetime.now(timezone.utc)
 spark.sql(f"""
 UPDATE {full_schema}.pipeline_runs
 SET status = 'failed',
-    finished_at = COALESCE(finished_at, current_timestamp()),
-    error_message = 'Run never reported completion; marked failed by a subsequent run'
+    error_message = 'Run never reported completion; marked failed by a subsequent run. '
+                 || 'Finish time unknown, so finished_at is left NULL.'
 WHERE run_type = 'metrics'
   AND status = 'running'
 """)

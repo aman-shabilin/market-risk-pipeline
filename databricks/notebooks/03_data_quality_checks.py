@@ -59,8 +59,8 @@ run_id = str(uuid.uuid4())
 spark.sql(f"""
 UPDATE {full_schema}.pipeline_runs
 SET status = 'failed',
-    finished_at = COALESCE(finished_at, current_timestamp()),
-    error_message = 'Run never reported completion; marked failed by a subsequent run'
+    error_message = 'Run never reported completion; marked failed by a subsequent run. '
+                 || 'Finish time unknown, so finished_at is left NULL.'
 WHERE run_type = 'quality_check'
   AND status = 'running'
 """)
