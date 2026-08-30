@@ -29,7 +29,7 @@ source (S3 / Yahoo / Auto Loader)  ->  Spark validation  ->  Delta Lake (MERGE) 
 ## Current Status and Roadmap
 
 **Read this section first.** It is the handover point for a new session. Last
-updated 2026-08-30 at commit `198ab24`.
+updated 2026-08-30, after item 5 landed.
 
 The project is being worked through a **portfolio-readiness plan**: the code was
 already sound, but the repository did not *present* as sound to someone spending
@@ -68,8 +68,8 @@ by technical interest.
 | 1 | Fix the failing CI (5 ruff errors, 1 mypy error) | **done** — `fbca5ef` |
 | 2 | Mermaid architecture diagram + screenshot scaffolding | **done** — `3b7dc04` |
 | 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
-| 4 | Split `spark_exercises/` into its own repository | **not started** |
-| 5 | Fix `02_compute_risk_metrics.py` (see below) | **not started — highest priority** |
+| 4 | Split `spark_exercises/` into its own repository | **not started — next** |
+| 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** |
 | 6 | Backfill a realistic data volume and publish timings | **not started** |
 | 7 | Add a dbt or Airflow layer | **not started** |
 
@@ -87,31 +87,38 @@ broken meanwhile. See `docs/CAPTURE_CHECKLIST.md` for the procedure and two
 known nits (a `Sum of ...` axis label on the volatility chart, and the account
 email visible in the run-history capture).
 
-### Item 5 in detail — the next thing to do
+### Item 5 in detail — what changed
 
-`databricks/notebooks/02_compute_risk_metrics.py` has one genuine correctness
-bug and three quality problems. In priority order:
+`databricks/notebooks/02_compute_risk_metrics.py` carried one correctness bug and
+three quality problems. All five points below are now fixed. The notebook is not
+covered by the test suite, so this was verified by `python -m py_compile` and by
+reading — **it has not yet been run on Databricks.** Watch the next scheduled run.
 
-1. **Row ordering is not guaranteed inside the Pandas UDF** (bug). The UDF takes
-   `dates[0]` / `dates[-1]` as the metric window bounds (lines 197-198) and runs
-   `np.cumprod` for max drawdown (line 188), both of which depend on rows
-   arriving in date order. Sorting the DataFrame upstream does not survive the
-   `groupBy` shuffle, so `max_drawdown` can vary between runs on identical
-   input. Fix: `pdf = pdf.sort_values("date")` as the first statement in the UDF.
-2. **`PandasUDFType.GROUPED_MAP` is deprecated** (line 157) — removed in Spark 4,
-   so it will break outright on a future DBR. Migrate to
-   `returns_df.groupBy("ticker").applyInPandas(fn, schema=metrics_schema)`, and
-   update the tech-stack table below plus the README wording if the API name
-   surfaces there.
-3. **`metrics_clean.count()` is called twice** (lines 224, 315) with no
-   `.cache()`, re-executing the whole UDF DAG each time.
-4. **Dead code and duplicated logic.** `rolling_metrics_df` (line 271) is
-   computed and never used; the rolling logic is then re-implemented
-   independently in SQL for the `v_rolling_metrics` view, so the two can drift.
-   That is the exact failure mode `metrics/service.py` was built to prevent on
-   the Python side. Pick one definition.
-
-Also minor: `F.isnan(...) == False` (line 221) is non-idiomatic and misses NULLs.
+1. **Row ordering inside the grouped-map function** (the bug). The function takes
+   `dates[0]` / `dates[-1]` as the metric window bounds and runs `np.cumprod` for
+   max drawdown, both of which need rows in date order. Sorting upstream did not
+   survive the `groupBy` shuffle, so `max_drawdown` and the window bounds could
+   vary between runs on identical input. Now `pdf = pdf.sort_values("date")` is
+   the first statement in the function body. The upstream `.orderBy("ticker",
+   "date")` was dropped, since it bought nothing and cost a full sort.
+2. **`PandasUDFType.GROUPED_MAP` (deprecated, removed in Spark 4)** replaced with
+   `returns_df.groupBy("ticker").applyInPandas(compute_metrics, schema=metrics_schema)`.
+   The plain function keeps the same closure over `risk_free_rate`, and the output
+   column order still matches `metrics_schema` positionally, so the result is
+   identical under either column-matching mode.
+3. **`metrics_clean` is now cached** and its count taken once into
+   `metrics_count`. Four actions consume that DataFrame (count, display, MERGE,
+   run-audit collect); previously each re-ran the whole DAG, which also meant the
+   `computed_at` and `computation_duration_ms` values shown differed from the ones
+   merged.
+4. **The duplicated rolling logic is down to one definition.** The unused
+   `rolling_metrics_df` is gone and the `v_rolling_metrics` view is the single
+   source. The view now also excludes the 21-day warmup rows, which the deleted
+   PySpark version filtered and the view did not — so the dashboard no longer
+   shows a "21-day" volatility computed from two observations. **This changes view
+   output:** the earliest 21 rows per ticker disappear.
+5. **`F.isnan(...) == False`** replaced with an explicit
+   `isNotNull() & ~isnan(...)`, which also drops NULLs.
 
 ### Why item 6 matters
 
@@ -456,7 +463,7 @@ databricks/
 | **Liquid Clustering** | `CLUSTER BY (ticker, date)` for optimized query performance |
 | **Auto Loader** | Incremental file ingestion from cloud storage (processes only new files) |
 | **Databricks Volumes** | Unity Catalog managed storage for raw data files |
-| **Pandas UDFs (Grouped Map)** | Scalable per-ticker metric computation distributed across executors |
+| **Grouped-Map Pandas Functions** | `groupBy(...).applyInPandas(...)` for scalable per-ticker metric computation across executors |
 | **Window Functions** | Rolling volatility, gap detection, lag-based return computation |
 | **Databricks Workflows** | DAG orchestration: ingest → quality check → metrics (with retries) |
 | **Serverless Compute** | Workflow runs on serverless (no cluster management, auto-scaling) |
@@ -476,7 +483,7 @@ databricks/
 | `portfolio_holdings` | Ticker weights | Weight validation constraint |
 | `pipeline_runs` | Execution audit log | Status tracking, error capture, parameters JSON |
 | `data_quality_scores` | Quality check results | Per-ticker per-check scoring with JSON details |
-| `v_rolling_metrics` | Rolling risk view | SQL view over window function results |
+| `v_rolling_metrics` | Rolling risk view | SQL view over window function results; single definition of the 21-day window, warmup rows excluded |
 
 ### Workflow DAG
 
@@ -577,8 +584,8 @@ The `spark_exercises/` directory contains PySpark data cleansing exercises unrel
 3. **No MLflow integration** - Could version metric models and track drift
 4. **Dashboard requires manual setup** - SQL queries need to be imported manually (no Terraform/API automation yet)
 5. **Runs as a user, not a service principal** - The job's `run_as` is the creating user. A service principal would give a non-human audit identity and least-privilege access
-6. **`02_compute_risk_metrics.py` needs work** - Row ordering inside the Pandas UDF is not guaranteed (affects `max_drawdown`), the `GROUPED_MAP` API is deprecated, and the rolling-metrics logic is duplicated between Python and SQL. See *Current Status and Roadmap → Item 5* for detail
-7. **Data volume is small** - ~62k rows read per run across 10 tickers, which does not yet justify the distributed machinery
+6. **Data volume is small** - ~62k rows read per run across 10 tickers, which does not yet justify the distributed machinery
+7. **`v_rolling_metrics` recomputes returns on every query** - The view derives daily returns with `LAG` at read time rather than reading the persisted values; materializing it would cut dashboard latency at the cost of another table to keep fresh
 
 ---
 
