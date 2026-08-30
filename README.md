@@ -346,3 +346,11 @@ your local config.
 - Batch-only (no Structured Streaming for real-time).
 - Dashboard requires manual setup (no Terraform/API automation yet).
 - The job runs as the creating user rather than a service principal.
+- ~62k rows read per run across 10 tickers — a volume that does not yet justify the
+  distributed machinery.
+
+## Related
+
+PySpark data cleansing exercises that used to live in this repository now sit in
+[spark-exercises](https://github.com/aman-shabilin/spark-exercises) — teaching
+material, kept separate from the pipeline.

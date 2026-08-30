@@ -71,7 +71,7 @@ by technical interest.
 | 1 | Fix the failing CI (5 ruff errors, 1 mypy error) | **done** — `fbca5ef` |
 | 2 | Mermaid architecture diagram + screenshot scaffolding | **done** — `3b7dc04` |
 | 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
-| 4 | Split `spark_exercises/` into its own repository | **done locally — remote not yet created** |
+| 4 | Split `spark_exercises/` into its own repository | **done** |
 | 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** |
 | 6 | Backfill a realistic data volume and publish timings | **not started — next** |
 | 7 | Add a dbt or Airflow layer | **not started** |
@@ -90,24 +90,14 @@ broken meanwhile. See `docs/CAPTURE_CHECKLIST.md` for the procedure and two
 known nits (a `Sum of ...` axis label on the volatility chart, and the account
 email visible in the run-history capture).
 
-### Outstanding on item 4
+### Where item 4 landed
 
-The exercises now live in a standalone git repository at
-`/Users/SHAMA029/spark-exercises` (branch `main`, one commit) and are deleted from
-this repo along with `data/dirty/`, which only they used. The new repo carries its
-own README, a ruff config that ignores `N812` for the `functions as F` idiom, and
-a lint + compile CI; it lints clean.
-
-**The GitHub remote does not exist yet** — creating a public repository is an
-outward-facing step left to the owner:
-
-```bash
-gh repo create spark-exercises --public --source /Users/SHAMA029/spark-exercises \
-  --description "PySpark data cleansing exercises, eight progressive levels" --push
-```
-
-Until that runs, the new repo's README links to `market-risk-pipeline` but nothing
-links back. Once it exists, consider a one-line pointer from this repo's README.
+The exercises live at `github.com/aman-shabilin/spark-exercises` (public, default
+branch `main`, CI green), checked out locally at `/Users/SHAMA029/spark-exercises`.
+They are deleted from this repo along with `data/dirty/`, which only they used. The
+new repo carries its own README, a ruff config that ignores `N812` for the
+`functions as F` idiom, and a lint + compile CI; it lints clean. The two
+repositories link to each other — this one from its README's *Related* section.
 
 ### Item 5 in detail — what changed
 
