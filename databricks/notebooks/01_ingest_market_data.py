@@ -12,6 +12,12 @@
 # MAGIC - Change Data Feed for downstream consumers
 # MAGIC - Audit trail via pipeline_runs table
 # MAGIC - Structured Streaming readiness (Auto Loader pattern)
+# MAGIC
+# MAGIC **Running this notebook by hand:** add `yfinance` in the Environment side panel
+# MAGIC first. The job supplies it through the `environments` block in
+# MAGIC `databricks/workflows/market_risk_pipeline.json`, which an interactive serverless
+# MAGIC session does not inherit — without it the `yahoo` source fails at `import
+# MAGIC yfinance`. The other sources have no extra dependency.
 
 # COMMAND ----------
 

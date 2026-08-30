@@ -229,7 +229,11 @@ and 30 days had hidden:
 #    Verify: the last cell groups by sector; expect ~11 sectors, ~503 active
 
 # 3. One-off backfill: run the ingest notebook alone, not the job
-#    Open databricks/notebooks/01_ingest_market_data.py and set widgets:
+#    FIRST: add yfinance to the notebook's Environment panel and Apply.
+#    yfinance is declared in the job's serverless environment (see "Serverless
+#    dependencies" below), which an interactive run does not inherit -- without
+#    this the import fails with ModuleNotFoundError.
+#    Then set widgets:
 #      ticker_source  = table
 #      lookback_days  = 7300        # 20 years
 #      fetch_chunk_size = 25
@@ -675,6 +679,30 @@ tile is not a chart, and the table holds one row per ticker per window.
 - PySpark RDDs are not supported — use DataFrame `.collect()` instead of `.rdd.flatMap()`
 - Persistent views cannot reference temp views — use source table queries directly
 - Column `DEFAULT` values require `delta.feature.allowColumnDefaults` (removed from DDL)
+
+#### Serverless dependencies
+
+`yfinance` is the pipeline's only non-builtin dependency, and it is declared once,
+in the workflow's `environments` block:
+
+```json
+"environments": [
+  { "environment_key": "pipeline_env",
+    "spec": { "client": "2", "dependencies": ["yfinance"] } }
+]
+```
+
+All three tasks reference it by `environment_key`, so **the job always has it and
+an interactive notebook run never does** — a serverless notebook carries its own
+environment. Running `01_ingest_market_data` by hand therefore fails at
+`import yfinance` with `ModuleNotFoundError` unless you first add `yfinance`
+through the notebook's Environment side panel (right-hand icon → Dependencies →
+Apply). That panel setting persists for the notebook and, unlike a `%pip install`
+cell, does not restart the interpreter mid-run or leak an install into the job's
+already-provisioned environment.
+
+This only affects `01_ingest_market_data`; the metrics and quality notebooks use
+nothing outside PySpark and pandas.
 
 ---
 
