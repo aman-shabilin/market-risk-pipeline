@@ -207,6 +207,36 @@ print("Created: data_quality_scores")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Ticker Universe Table
+# MAGIC
+# MAGIC The set of tickers the pipeline tracks. Kept in a table rather than a job
+# MAGIC parameter because a 500-symbol comma-separated string in the workflow JSON is
+# MAGIC neither reviewable nor queryable, and the sector column lets the dashboard roll
+# MAGIC metrics up by sector. Populate it with `seed_ticker_universe`.
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {full_schema}.ticker_universe (
+    ticker          STRING      NOT NULL    COMMENT 'Yahoo symbol; share classes use a dash',
+    company_name    STRING                  COMMENT 'Registrant name',
+    sector          STRING                  COMMENT 'GICS sector',
+    active          BOOLEAN     NOT NULL    COMMENT 'False once a symbol leaves the index',
+    added_at        TIMESTAMP   NOT NULL    COMMENT 'When the symbol first entered this table'
+)
+USING DELTA
+COMMENT 'Tickers the pipeline ingests, with GICS sector for dashboard rollups'
+TBLPROPERTIES (
+    'delta.autoOptimize.optimizeWrite' = 'true',
+    'delta.enableChangeDataFeed' = 'true'
+)
+""")
+
+print("Created: ticker_universe")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Verify Setup
 
 # COMMAND ----------

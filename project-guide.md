@@ -29,7 +29,8 @@ source (S3 / Yahoo / Auto Loader)  ->  Spark validation  ->  Delta Lake (MERGE) 
 ## Current Status and Roadmap
 
 **Read this section first.** It is the handover point for a new session. Last
-updated 2026-08-30 at commit `198ab24`.
+updated 2026-08-30, after the item 6 code landed (the backfill run itself is
+still pending — see *Item 6 in detail*).
 
 The project is being worked through a **portfolio-readiness plan**: the code was
 already sound, but the repository did not *present* as sound to someone spending
@@ -54,8 +55,11 @@ by technical interest.
   commands as `.venv-1/bin/python -m ...`.
 - **CI must stay green.** It runs exactly three gates: `pytest --cov`,
   `ruff check src/ tests/`, `mypy src/`. Note the lint gate covers only `src/`
-  and `tests/` — `databricks/` and `spark_exercises/` sit outside it and
-  currently carry ~146 ruff violations, which is why they do not break CI.
+  and `tests/` — `databricks/` sits outside it and carries ~158 ruff violations,
+  which is why they do not break CI. Nearly all are `F821` on the notebook
+  globals `spark`, `dbutils` and `display`, plus `E402` on the per-cell imports;
+  both are inherent to the notebook format rather than real defects. Bringing
+  `databricks/` under the gate would mean configuring those away first.
 - **Commit messages carry no `Co-Authored-By` trailer.**
 - Work happens directly on `main` (solo project, no PR flow).
 - Notebook changes cannot be covered by the test suite; verify them with
@@ -68,10 +72,10 @@ by technical interest.
 | 1 | Fix the failing CI (5 ruff errors, 1 mypy error) | **done** — `fbca5ef` |
 | 2 | Mermaid architecture diagram + screenshot scaffolding | **done** — `3b7dc04` |
 | 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
-| 4 | Split `spark_exercises/` into its own repository | **not started** |
-| 5 | Fix `02_compute_risk_metrics.py` (see below) | **not started — highest priority** |
-| 6 | Backfill a realistic data volume and publish timings | **not started** |
-| 7 | Add a dbt or Airflow layer | **not started** |
+| 4 | Split `spark_exercises/` into its own repository | **done** |
+| 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** |
+| 6 | Backfill a realistic data volume and publish timings | **code done, run pending** |
+| 7 | Add a dbt or Airflow layer | **not started — next** |
 
 Items 1-3 existed because a public repo with a red CI badge and no visual
 evidence of the Databricks work reads as unfinished regardless of code quality.
@@ -87,40 +91,150 @@ broken meanwhile. See `docs/CAPTURE_CHECKLIST.md` for the procedure and two
 known nits (a `Sum of ...` axis label on the volatility chart, and the account
 email visible in the run-history capture).
 
-### Item 5 in detail — the next thing to do
+### Where item 4 landed
 
-`databricks/notebooks/02_compute_risk_metrics.py` has one genuine correctness
-bug and three quality problems. In priority order:
+The exercises live at `github.com/aman-shabilin/spark-exercises` (public, default
+branch `main`, CI green), checked out locally at `/Users/SHAMA029/spark-exercises`.
+They are deleted from this repo along with `data/dirty/`, which only they used. The
+new repo carries its own README, a ruff config that ignores `N812` for the
+`functions as F` idiom, and a lint + compile CI; it lints clean. The two
+repositories link to each other — this one from its README's *Related* section.
 
-1. **Row ordering is not guaranteed inside the Pandas UDF** (bug). The UDF takes
-   `dates[0]` / `dates[-1]` as the metric window bounds (lines 197-198) and runs
-   `np.cumprod` for max drawdown (line 188), both of which depend on rows
-   arriving in date order. Sorting the DataFrame upstream does not survive the
-   `groupBy` shuffle, so `max_drawdown` can vary between runs on identical
-   input. Fix: `pdf = pdf.sort_values("date")` as the first statement in the UDF.
-2. **`PandasUDFType.GROUPED_MAP` is deprecated** (line 157) — removed in Spark 4,
-   so it will break outright on a future DBR. Migrate to
-   `returns_df.groupBy("ticker").applyInPandas(fn, schema=metrics_schema)`, and
-   update the tech-stack table below plus the README wording if the API name
-   surfaces there.
-3. **`metrics_clean.count()` is called twice** (lines 224, 315) with no
-   `.cache()`, re-executing the whole UDF DAG each time.
-4. **Dead code and duplicated logic.** `rolling_metrics_df` (line 271) is
-   computed and never used; the rolling logic is then re-implemented
-   independently in SQL for the `v_rolling_metrics` view, so the two can drift.
-   That is the exact failure mode `metrics/service.py` was built to prevent on
-   the Python side. Pick one definition.
+### Item 5 in detail — what changed
 
-Also minor: `F.isnan(...) == False` (line 221) is non-idiomatic and misses NULLs.
+`databricks/notebooks/02_compute_risk_metrics.py` carried one correctness bug and
+three quality problems. All five points below are now fixed. The notebook is not
+covered by the test suite, so this was verified by `python -m py_compile` and by
+reading — **it has not yet been run on Databricks.** Watch the next scheduled run.
 
-### Why item 6 matters
+1. **Row ordering inside the grouped-map function** (the bug). The function takes
+   `dates[0]` / `dates[-1]` as the metric window bounds and runs `np.cumprod` for
+   max drawdown, both of which need rows in date order. Sorting upstream did not
+   survive the `groupBy` shuffle, so `max_drawdown` and the window bounds could
+   vary between runs on identical input. Now `pdf = pdf.sort_values("date")` is
+   the first statement in the function body. The upstream `.orderBy("ticker",
+   "date")` was dropped, since it bought nothing and cost a full sort.
+2. **`PandasUDFType.GROUPED_MAP` (deprecated, removed in Spark 4)** replaced with
+   `returns_df.groupBy("ticker").applyInPandas(compute_metrics, schema=metrics_schema)`.
+   The plain function keeps the same closure over `risk_free_rate`, and the output
+   column order still matches `metrics_schema` positionally, so the result is
+   identical under either column-matching mode.
+3. **`metrics_clean` is now cached** and its count taken once into
+   `metrics_count`. Four actions consume that DataFrame (count, display, MERGE,
+   run-audit collect); previously each re-ran the whole DAG, which also meant the
+   `computed_at` and `computation_duration_ms` values shown differed from the ones
+   merged.
+4. **The duplicated rolling logic is down to one definition.** The unused
+   `rolling_metrics_df` is gone and the `v_rolling_metrics` view is the single
+   source. The view now also excludes the 21-day warmup rows, which the deleted
+   PySpark version filtered and the view did not — so the dashboard no longer
+   shows a "21-day" volatility computed from two observations. **This changes view
+   output:** the earliest 21 rows per ticker disappear.
+5. **`F.isnan(...) == False`** replaced with an explicit
+   `isNotNull() & ~isnan(...)`, which also drops NULLs.
 
-The pipeline reads ~62k rows per run across 10 tickers. That is a laptop-sized
-problem, which undercuts the Delta MERGE / liquid clustering / Pandas UDF
-framing — distributing that work is not yet justified by the data. Backfilling
-roughly ten years across ~100 tickers (~250k rows) and publishing before/after
-run timings is what turns this from a well-built service into a data engineering
-project.
+### Item 6 in detail — what changed
+
+**Why it mattered.** The pipeline read ~62k rows per run across 10 tickers. That
+is a laptop-sized problem, which undercuts the Delta MERGE / liquid clustering /
+grouped-map framing — distributing that work was not yet justified by the data.
+
+**Chosen scale: the S&P 500 over 20 years** — ~503 symbols, ~2.5M price rows,
+~503 `applyInPandas` groups. Two caveats that belong in any writeup:
+
+- **Survivorship bias.** The constituent list is today's index membership
+  backfilled over 20 years, so aggregate returns are flattered — the companies
+  that dropped out are not in it. Fine for exercising the machinery, wrong for
+  making claims about market returns.
+- **Yahoo symbol convention.** Share classes take a dash, not a dot: `BRK-B`,
+  `BF-B`. The seed list already uses the dash form.
+
+Nothing here has run on Databricks yet. It was verified by `py_compile`, by a
+lint comparison against the previous commit, and by reading.
+
+**What the scale change actually required.** The interesting part was not the
+volume, it was that 503 tickers and 20 years broke assumptions that 10 tickers
+and 30 days had hidden:
+
+1. **A new `ticker_universe` table** (`databricks/config/setup_delta_tables.py`,
+   seeded by `databricks/config/seed_ticker_universe.py`). 500 symbols as a
+   comma-separated job parameter is neither reviewable in a diff nor queryable,
+   and every consumer would re-parse it. The seed notebook MERGEs the list with
+   three clauses: matched rows keep their `added_at`, new rows insert, and
+   `WHEN NOT MATCHED BY SOURCE` marks departed symbols `active = false` rather
+   than deleting them — their price history stays valid, it just stops being
+   refreshed. The `sector` column is what lets the dashboard roll up.
+2. **Chunked, retrying Yahoo fetch** (`01_ingest_market_data.py`). `yf.download`
+   takes a list and returns one frame with a `(field, ticker)` column MultiIndex,
+   so 503 symbols go out in ~21 requests of 25 instead of 503 sequential ones.
+   A chunk that errors is retried with exponential backoff, then reported and
+   skipped rather than failing the run — MERGE means the next run picks up what
+   was missed. Missing or delisted symbols come back as all-NaN columns rather
+   than being omitted, which is why `_tidy_ticker_frame` drops incomplete rows and
+   returns `None` to distinguish "no data" from "bad data".
+3. **Each chunk goes to Spark as it arrives**, unioned at the end, instead of one
+   `pd.concat` of everything. The driver has no reason to hold 2.5M rows.
+   `validated_df` is now cached, because four things read it (two counts, the
+   MERGE, the distinct-ticker collect).
+4. **The metrics window is now trailing, not "all history"**
+   (`metrics_window_days`, default 365, in `02_compute_risk_metrics.py`). Over 20
+   years the old code reported a 2006–2026 volatility as today's risk and pinned
+   `window_start` to 2006 forever while `window_end` crept forward. The floor is
+   anchored on the table's own `MAX(date)`, not `current_date()`, so the window is
+   still the intended length when ingestion is a few days behind. Eligibility
+   (`min_price_points`) is now judged inside the window.
+5. **Quality checks are scoped and bounded** (`03_data_quality_checks.py`). All
+   four checks read a `scoped_prices` view restricted to `active` tickers, because
+   a departed symbol is stale by definition and would show a permanent freshness
+   failure nobody intends to fix (`restrict_to_active_universe`, default true,
+   falls back to every ticker with a warning if the universe is unseeded). The
+   outlier and gap checks are bounded to `history_lookback_days` (default 180):
+   scored over 20 years, the outlier rate is dominated by 2008 and 2020 and a bad
+   ingest today cannot move a denominator of 5,000 points, while `>5`-day gaps
+   accumulate legitimately around holidays until every symbol scores 0.2 and the
+   check distinguishes nothing. `all_scores` is cached before the MERGE.
+6. **Every dashboard tile is now bounded**
+   (`databricks/sql/dashboard_queries.sql`). Each `computed_metrics` tile reduces
+   to the latest snapshot per ticker with `QUALIFY ROW_NUMBER() OVER (PARTITION BY
+   ticker ORDER BY window_end DESC, computed_at DESC) = 1`, since the table keeps
+   one row per ticker per window. Bar charts take the top 25; the quality heatmap
+   takes the 40 weakest tickers (2,000 cells reads as wallpaper); rolling
+   volatility is aggregated to 11 sector medians with a `:ticker`-parameterized
+   drilldown beside it; ingestion volume is totalled rather than split into 503
+   series; the inventory listing became a counter tile plus a coverage-gaps table.
+   The CDF query no longer reads from version 1 — after a 20-year backfill that
+   replays every change ever made to the table — but from a 3-day window. The
+   risk-return scatter is deliberately left unbounded and coloured by sector: 500
+   points is the one tile where the full universe earns its keep.
+7. **Timeouts raised** in `market_risk_pipeline.json` (ingest 1800→3600, quality
+   600→1800, metrics 1200→2400) and the ingest task now passes
+   `ticker_source=table`.
+
+**The backfill runbook** (not yet executed):
+
+```bash
+# 1. Create the new table (idempotent; re-running setup is safe)
+#    Open databricks/config/setup_delta_tables.py → Run All
+
+# 2. Seed the universe — 503 rows, one MERGE
+#    Open databricks/config/seed_ticker_universe.py → Run All
+#    Verify: the last cell groups by sector; expect ~11 sectors, ~503 active
+
+# 3. One-off backfill: run the ingest notebook alone, not the job
+#    Open databricks/notebooks/01_ingest_market_data.py and set widgets:
+#      ticker_source  = table
+#      lookback_days  = 7300        # 20 years
+#      fetch_chunk_size = 25
+#    Expect ~21 chunk fetches. Yahoo is the slow part, not Spark.
+
+# 4. Then run the job normally; lookback_days=30 keeps it incremental
+databricks jobs run-now --job-id <JOB_ID>
+```
+
+**Timings to publish once it has run.** Before: 3m42s, 62,234 rows read / 7,576
+written, 10 tickers. After: _pending_ — record wall-clock per task, rows read and
+written, and `computed_metrics` row count. The comparison is the deliverable of
+item 6; the code change is only what makes it possible.
 
 ### Confidentiality constraint on screenshots
 
@@ -149,10 +263,8 @@ market-risk-pipeline/
 │   ├── notebooks/             #   Ingestion, metrics, quality checks
 │   ├── sql/                   #   Dashboard queries (15+)
 │   └── workflows/             #   Scheduled DAG definition
-├── spark_exercises/           # PySpark learning exercises (8 levels)
 ├── data/
-│   ├── sample/                #   Clean sample OHLCV data
-│   └── dirty/                 #   Intentionally dirty data for Spark exercises
+│   └── sample/                #   Clean sample OHLCV data
 ├── tests/                     # Unit + integration test suite
 │   ├── unit/                  #   Isolated metric/schema/repo tests
 │   └── integration/           #   End-to-end API + pipeline tests
@@ -434,10 +546,11 @@ The `databricks/` directory contains a full Databricks-native implementation of 
 ```
 databricks/
 ├── config/
-│   └── setup_delta_tables.py          # Unity Catalog schema + Delta table creation
+│   ├── setup_delta_tables.py          # Unity Catalog schema + Delta table creation
+│   └── seed_ticker_universe.py        # MERGEs the S&P 500 constituent list + sectors
 ├── notebooks/
-│   ├── 01_ingest_market_data.py       # Multi-source ingestion into Delta Lake
-│   ├── 02_compute_risk_metrics.py     # Risk metrics via Pandas UDFs
+│   ├── 01_ingest_market_data.py       # Multi-source chunked ingestion into Delta Lake
+│   ├── 02_compute_risk_metrics.py     # Risk metrics via applyInPandas, trailing window
 │   └── 03_data_quality_checks.py      # Freshness, completeness, outlier, gap checks
 ├── sql/
 │   └── dashboard_queries.sql          # 15+ queries for Databricks SQL Dashboard
@@ -456,7 +569,7 @@ databricks/
 | **Liquid Clustering** | `CLUSTER BY (ticker, date)` for optimized query performance |
 | **Auto Loader** | Incremental file ingestion from cloud storage (processes only new files) |
 | **Databricks Volumes** | Unity Catalog managed storage for raw data files |
-| **Pandas UDFs (Grouped Map)** | Scalable per-ticker metric computation distributed across executors |
+| **Grouped-Map Pandas Functions** | `groupBy(...).applyInPandas(...)` for scalable per-ticker metric computation across executors |
 | **Window Functions** | Rolling volatility, gap detection, lag-based return computation |
 | **Databricks Workflows** | DAG orchestration: ingest → quality check → metrics (with retries) |
 | **Serverless Compute** | Workflow runs on serverless (no cluster management, auto-scaling) |
@@ -476,7 +589,8 @@ databricks/
 | `portfolio_holdings` | Ticker weights | Weight validation constraint |
 | `pipeline_runs` | Execution audit log | Status tracking, error capture, parameters JSON |
 | `data_quality_scores` | Quality check results | Per-ticker per-check scoring with JSON details |
-| `v_rolling_metrics` | Rolling risk view | SQL view over window function results |
+| `ticker_universe` | Which tickers the pipeline tracks | 3-clause MERGE; departed symbols flipped to `active = false`, not deleted; GICS sector for rollups |
+| `v_rolling_metrics` | Rolling risk view | SQL view over window function results; single definition of the 21-day window, warmup rows excluded |
 
 ### Workflow DAG
 
@@ -498,17 +612,22 @@ databricks/
 
 - Scheduled: weekdays at 6 PM ET (after market close)
 - Retries: ingest (2x), quality/metrics (1x)
-- Cluster: Photon-enabled, autoscale 1-4 workers
+- Compute: serverless, via the `environments` block (the workspace has no job clusters)
+- Timeouts: ingest 3600s, quality 1800s, metrics 2400s — raised for the 503-ticker universe
 - Notifications: email on failure
 
 ### SQL Dashboard Sections
 
 1. **Pipeline Health** — Run history, success rate, last run status
-2. **Data Quality Scorecard** — Heatmap of scores, trend over time, failing tickers
-3. **Risk Metrics Overview** — Current metrics table, volatility comparison, risk-return scatter
-4. **Rolling Metrics** — Time-series volatility, return distribution
-5. **Data Coverage** — Inventory per ticker, daily ingestion volume, source breakdown
-6. **Delta Operations** — Table history, size detail, change data feed audit
+2. **Data Quality Scorecard** — Heatmap of the 40 weakest tickers, trend over time, failing tickers
+3. **Risk Metrics Overview** — Latest snapshot per ticker, top-25 volatility, sector-coloured risk-return scatter, fattest tails
+4. **Rolling Metrics** — Sector-median volatility, plus a `:ticker`-parameterized drilldown and return distribution
+5. **Data Coverage** — Coverage counters, coverage-gap table, total daily ingestion volume, source breakdown
+6. **Delta Operations** — Table history, size detail, change data feed audit bounded to recent days
+
+Every per-ticker tile is bounded, and each `computed_metrics` tile reduces to the
+latest window per ticker with `QUALIFY ROW_NUMBER()`. At 503 tickers an unbounded
+tile is not a chart, and the table holds one row per ticker per window.
 
 ### How to Deploy on Databricks
 
@@ -524,6 +643,10 @@ databricks/
 
 # 3. Run schema setup (one-time)
 #    Open databricks/config/setup_delta_tables.py → Run All
+
+# 3b. Seed the ticker universe (one-time; re-run to refresh membership)
+#    Open databricks/config/seed_ticker_universe.py → Run All
+#    The ingest task reads it (ticker_source=table) and fails fast if it is empty
 
 # 4. Create the workflow (serverless compute)
 #    databricks jobs create --json @databricks/workflows/market_risk_pipeline.json
@@ -547,18 +670,13 @@ databricks/
 
 ---
 
-## Spark Exercises (Supplementary)
+## Spark Exercises (Moved Out)
 
-The `spark_exercises/` directory contains PySpark data cleansing exercises unrelated to the main pipeline. These are 8 progressive levels teaching DataFrame transformations on intentionally dirty market data (`data/dirty/market_data_dirty.csv`):
-
-1. Read & inspect
-2. Standardization (case, trim, types)
-3. Null handling
-4. Filtering invalid records
-5. Deduplication
-6. Derived columns & window functions
-7. Aggregations & joins
-8. Full pipeline (chain everything)
+The eight PySpark data cleansing exercises that used to live in `spark_exercises/`,
+along with the intentionally dirty CSV they read (`data/dirty/`), now live in their
+own repository — see *Current Status and Roadmap → Outstanding on item 4*. They
+were teaching material with no connection to the pipeline code, and sharing a
+repository with it made both look less deliberate than they are.
 
 ---
 
@@ -567,7 +685,7 @@ The `spark_exercises/` directory contains PySpark data cleansing exercises unrel
 ### Standalone (FastAPI)
 1. **No Alembic migrations** - Schema changes require manual ALTER or fresh DB
 2. **Synchronous ingestion** - `POST /api/v1/ingest/` blocks the request for large pulls
-3. **No rate limiting on Yahoo** - Fetches one ticker per call with no retry/backoff
+3. **No rate limiting on Yahoo** - Fetches one ticker per call with no retry/backoff. The Databricks notebook now batches 25 symbols per request and retries with exponential backoff; porting `ingest_from_yahoo`'s approach into `src/market_risk/ingest/` would close the divergence
 4. **No auth/authorization** - API is completely open
 5. **Single-process cache** - InMemoryCache doesn't share state across workers
 
@@ -577,8 +695,11 @@ The `spark_exercises/` directory contains PySpark data cleansing exercises unrel
 3. **No MLflow integration** - Could version metric models and track drift
 4. **Dashboard requires manual setup** - SQL queries need to be imported manually (no Terraform/API automation yet)
 5. **Runs as a user, not a service principal** - The job's `run_as` is the creating user. A service principal would give a non-human audit identity and least-privilege access
-6. **`02_compute_risk_metrics.py` needs work** - Row ordering inside the Pandas UDF is not guaranteed (affects `max_drawdown`), the `GROUPED_MAP` API is deprecated, and the rolling-metrics logic is duplicated between Python and SQL. See *Current Status and Roadmap → Item 5* for detail
-7. **Data volume is small** - ~62k rows read per run across 10 tickers, which does not yet justify the distributed machinery
+6. **Data volume is small until the backfill runs** - Still ~62k rows read per run across 10 tickers on the deployed job. The code for the S&P 500 × 20-year universe is in place but the backfill has not been executed — see *Current Status and Roadmap → Item 6 in detail* for the runbook
+7. **`v_rolling_metrics` recomputes returns on every query** - The view derives daily returns with `LAG` at read time rather than reading the persisted values. At 2.5M rows this is the most expensive thing the dashboard does; materializing it would cut latency at the cost of another table to keep fresh
+8. **`computed_metrics` grows unboundedly** - One row per ticker per `(window_start, window_end)`, and a trailing window advances both bounds daily, so a weekday schedule adds ~503 rows a day (~130k/year) forever. That snapshot history is intentional — it is what makes risk trends queryable — but there is no retention policy, and every read has to filter to the latest window with `QUALIFY`. A `VACUUM`/retention plan or a partition on `window_end` is the missing piece
+9. **Survivorship bias in the ticker universe** - The seed list is today's S&P 500 membership backfilled 20 years, so any aggregate return computed from it is flattered. Acceptable for exercising the pipeline; wrong for claims about the market. Fixing it needs a point-in-time constituent source
+10. **No trading calendar** - Completeness and gap checks approximate expected trading days as weekdays (`days * 5/7`) and treat gaps over 3-5 days as suspicious. Real holidays therefore cost score. A proper exchange calendar would make both checks exact
 
 ---
 

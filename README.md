@@ -251,10 +251,12 @@ designed for production-scale runs on Delta Lake with serverless compute.
 
 ```
 databricks/
-├── config/setup_delta_tables.py          # Unity Catalog schema + Delta table DDL
+├── config/
+│   ├── setup_delta_tables.py             # Unity Catalog schema + Delta table DDL
+│   └── seed_ticker_universe.py           # MERGEs the tracked ticker list + GICS sectors
 ├── notebooks/
-│   ├── 01_ingest_market_data.py          # Multi-source ingestion into Delta Lake
-│   ├── 02_compute_risk_metrics.py        # Risk metrics via Pandas UDFs
+│   ├── 01_ingest_market_data.py          # Chunked multi-source ingestion into Delta Lake
+│   ├── 02_compute_risk_metrics.py        # Risk metrics via applyInPandas
 │   └── 03_data_quality_checks.py         # Freshness, completeness, outlier, gap checks
 ├── sql/dashboard_queries.sql             # 15+ queries for SQL Dashboard
 └── workflows/market_risk_pipeline.json   # Scheduled DAG (ingest -> quality -> metrics)
@@ -346,3 +348,18 @@ your local config.
 - Batch-only (no Structured Streaming for real-time).
 - Dashboard requires manual setup (no Terraform/API automation yet).
 - The job runs as the creating user rather than a service principal.
+- ~62k rows read per run across 10 tickers — a volume that does not yet justify the
+  distributed machinery. The code for an S&P 500 × 20-year universe (~2.5M rows) is
+  in place behind the `ticker_universe` table; the backfill has not been run yet.
+- The ticker universe is today's index membership, so any aggregate return computed
+  from a 20-year backfill of it carries survivorship bias.
+- No exchange trading calendar: the completeness and gap checks approximate trading
+  days as weekdays, so market holidays cost quality score.
+- `computed_metrics` accumulates one row per ticker per window with no retention
+  policy; reads filter to the latest window with `QUALIFY ROW_NUMBER()`.
+
+## Related
+
+PySpark data cleansing exercises that used to live in this repository now sit in
+[spark-exercises](https://github.com/aman-shabilin/spark-exercises) — teaching
+material, kept separate from the pipeline.

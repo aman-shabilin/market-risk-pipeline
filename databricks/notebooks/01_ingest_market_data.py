@@ -23,15 +23,18 @@
 dbutils.widgets.text("catalog", "market_risk", "Catalog")
 dbutils.widgets.text("schema", "analytics", "Schema")
 dbutils.widgets.dropdown("source", "yahoo", ["yahoo", "s3", "volume", "auto_loader"], "Data Source")
+dbutils.widgets.dropdown("ticker_source", "widget", ["widget", "table"], "Ticker List From")
 dbutils.widgets.text("tickers", "AAPL,MSFT,GOOGL,AMZN,META", "Tickers (comma-separated)")
 dbutils.widgets.text("lookback_days", "365", "Lookback Days")
+dbutils.widgets.text("fetch_chunk_size", "25", "Symbols per Yahoo request")
 dbutils.widgets.text("s3_path", "s3://market-data-bucket/ohlcv/", "S3/ADLS Path")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
 source = dbutils.widgets.get("source")
-tickers = [t.strip().upper() for t in dbutils.widgets.get("tickers").split(",")]
+ticker_source = dbutils.widgets.get("ticker_source")
 lookback_days = int(dbutils.widgets.get("lookback_days"))
+fetch_chunk_size = int(dbutils.widgets.get("fetch_chunk_size"))
 s3_path = dbutils.widgets.get("s3_path")
 
 full_schema = f"{catalog}.{schema}"
@@ -40,8 +43,34 @@ target_table = f"{full_schema}.market_prices"
 spark.sql(f"USE CATALOG {catalog}")
 spark.sql(f"USE SCHEMA {schema}")
 
+# The scheduled job reads the universe from ticker_universe: 500 symbols as a
+# comma-separated job parameter is neither reviewable in a diff nor queryable, and
+# every consumer would have to re-parse it. The widget path stays for ad-hoc runs.
+if ticker_source == "table":
+    universe_table = f"{full_schema}.ticker_universe"
+    if not spark.catalog.tableExists(universe_table):
+        raise ValueError(
+            f"{universe_table} does not exist -- run databricks/config/setup_delta_tables, "
+            "then databricks/config/seed_ticker_universe"
+        )
+    tickers = [
+        row.ticker
+        for row in spark.sql(
+            f"SELECT ticker FROM {universe_table} WHERE active ORDER BY ticker"
+        ).collect()
+    ]
+    if not tickers:
+        raise ValueError(
+            f"{universe_table} holds no active tickers -- "
+            "run databricks/config/seed_ticker_universe first"
+        )
+else:
+    tickers = [t.strip().upper() for t in dbutils.widgets.get("tickers").split(",") if t.strip()]
+
 print(f"Source: {source}")
-print(f"Tickers: {tickers}")
+print(f"Tickers: {len(tickers)} from {ticker_source}")
+print(f"  {tickers if len(tickers) <= 20 else tickers[:20] + ['...']}")
+print(f"Lookback: {lookback_days} days")
 print(f"Target: {target_table}")
 
 # COMMAND ----------
@@ -72,12 +101,22 @@ WHERE run_type = 'ingest'
   AND status = 'running'
 """)
 
+# Records the ticker count, not the list: with a 500-symbol universe the list would be
+# a 4 KB string in every audit row, and tickers_processed already captures what landed.
+run_params = json.dumps({
+    "source": source,
+    "ticker_source": ticker_source,
+    "ticker_count": len(tickers),
+    "lookback_days": lookback_days,
+    "fetch_chunk_size": fetch_chunk_size,
+})
+
 spark.sql(f"""
 INSERT INTO {full_schema}.pipeline_runs
 VALUES (
     '{run_id}', 'ingest', 'running',
     current_timestamp(), NULL, 0, 0, NULL, NULL,
-    '{json.dumps({"source": source, "tickers": tickers, "lookback_days": lookback_days})}'
+    '{run_params}'
 )
 """)
 
@@ -90,47 +129,134 @@ print(f"Pipeline run: {run_id}")
 
 # COMMAND ----------
 
-def ingest_from_yahoo(tickers, lookback_days):
-    """Fetch OHLCV data from Yahoo Finance using yfinance."""
-    import yfinance as yf
+EMPTY_PRICE_SCHEMA = (
+    "ticker STRING, date DATE, open DOUBLE, high DOUBLE, "
+    "low DOUBLE, close DOUBLE, volume BIGINT"
+)
+
+
+def _tidy_ticker_frame(sub, ticker):
+    """Reshape one ticker's OHLCV slice into the target column layout.
+
+    Returns None when the slice holds no usable rows. A multi-symbol download pads
+    unknown or delisted symbols with all-NaN columns rather than omitting them, so
+    dropping incomplete rows here is what distinguishes "no data" from "bad data".
+    """
     import pandas as pd
+
+    df = sub.reset_index().rename(columns={
+        "Date": "date", "Open": "open", "High": "high",
+        "Low": "low", "Close": "close", "Volume": "volume",
+    })
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    if df.empty:
+        return None
+
+    df["ticker"] = ticker
+    df["volume"] = df["volume"].astype("int64")
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    return df[["ticker", "date", "open", "high", "low", "close", "volume"]]
+
+
+def ingest_from_yahoo(tickers, lookback_days, chunk_size=25, max_attempts=3):
+    """Fetch OHLCV data from Yahoo Finance in chunks of symbols.
+
+    `yf.download` accepts a list and returns one frame with a (field, ticker) column
+    MultiIndex, so a single request covers many symbols. Fetching 500 symbols one at
+    a time instead means 500 sequential round trips -- slow enough to dominate the
+    run, and the pattern most likely to get throttled.
+
+    A chunk that errors is retried with exponential backoff. One that keeps failing
+    is reported and skipped rather than failing the run, because MERGE makes the next
+    run pick up whatever was missed.
+
+    Each chunk is handed to Spark as it arrives and the parts are unioned at the end.
+    Concatenating every chunk into one pandas frame first would put the whole result in
+    driver memory -- fine for 10 tickers over 30 days, but a 20-year backfill of the
+    S&P 500 is ~2.5M rows, and the driver has no reason to hold them all at once.
+    """
+    import time
+    from functools import reduce
+
+    import pandas as pd
+    import yfinance as yf
     from datetime import date, timedelta
 
     end = date.today()
     start = end - timedelta(days=lookback_days)
 
-    all_data = []
-    for ticker in tickers:
-        print(f"  Fetching {ticker}...")
-        raw = yf.download(
-            ticker,
-            start=start.isoformat(),
-            end=end.isoformat(),
-            progress=False,
-            auto_adjust=True,
-        )
-        if raw.empty:
-            print(f"  WARNING: No data for {ticker}")
+    parts = []
+    rows_total = 0
+    tickers_with_data = 0
+    no_data = []
+    failed_chunks = []
+
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i + chunk_size]
+        print(f"  Fetching {i + 1}-{i + len(chunk)} of {len(tickers)}...")
+
+        raw = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                raw = yf.download(
+                    chunk,
+                    start=start.isoformat(),
+                    end=end.isoformat(),
+                    progress=False,
+                    auto_adjust=True,
+                    group_by="column",
+                    threads=True,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - yfinance raises assorted network errors
+                if attempt == max_attempts:
+                    print(f"  WARNING: chunk failed after {max_attempts} attempts: {exc}")
+                    failed_chunks.extend(chunk)
+                else:
+                    time.sleep(2 ** attempt)
+
+        if raw is None or raw.empty:
+            no_data.extend(chunk)
             continue
 
+        # Single-symbol responses come back flat; multi-symbol ones are keyed
+        # (field, ticker) because of group_by="column".
+        chunk_frames = []
         if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
+            returned = set(raw.columns.get_level_values(-1))
+            for ticker in chunk:
+                if ticker not in returned:
+                    no_data.append(ticker)
+                    continue
+                tidied = _tidy_ticker_frame(raw.xs(ticker, axis=1, level=-1), ticker)
+                if tidied is None:
+                    no_data.append(ticker)
+                else:
+                    chunk_frames.append(tidied)
+        else:
+            tidied = _tidy_ticker_frame(raw, chunk[0])
+            if tidied is None:
+                no_data.append(chunk[0])
+            else:
+                chunk_frames.append(tidied)
 
-        df = raw.reset_index()
-        df = df.rename(columns={
-            "Date": "date", "Open": "open", "High": "high",
-            "Low": "low", "Close": "close", "Volume": "volume",
-        })
-        df["ticker"] = ticker
-        df["volume"] = df["volume"].astype("int64")
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        all_data.append(df[["ticker", "date", "open", "high", "low", "close", "volume"]])
+        if chunk_frames:
+            combined = pd.concat(chunk_frames, ignore_index=True)
+            rows_total += len(combined)
+            tickers_with_data += len(chunk_frames)
+            parts.append(spark.createDataFrame(combined))
+            print(f"    {len(combined)} rows for {len(chunk_frames)} tickers")
 
-    if not all_data:
-        return spark.createDataFrame([], schema="ticker STRING, date DATE, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume BIGINT")
+    if no_data:
+        print(f"  No data returned for {len(no_data)}: {sorted(no_data)}")
+    if failed_chunks:
+        print(f"  Fetch errors for {len(failed_chunks)}: {sorted(failed_chunks)}")
 
-    combined = pd.concat(all_data, ignore_index=True)
-    return spark.createDataFrame(combined)
+    if not parts:
+        return spark.createDataFrame([], schema=EMPTY_PRICE_SCHEMA)
+
+    print(f"  Fetched {rows_total} rows for {tickers_with_data} tickers")
+    return reduce(lambda a, b: a.unionByName(b), parts)
 
 # COMMAND ----------
 
@@ -228,7 +354,7 @@ def ingest_from_volume(catalog, schema):
 from pyspark.sql import functions as F
 
 if source == "yahoo":
-    raw_df = ingest_from_yahoo(tickers, lookback_days)
+    raw_df = ingest_from_yahoo(tickers, lookback_days, chunk_size=fetch_chunk_size)
 elif source == "s3":
     raw_df = ingest_from_cloud_storage(s3_path)
 elif source == "volume":
@@ -240,8 +366,6 @@ elif source == "auto_loader":
     print("Auto Loader streaming mode — see streaming section")
 else:
     raise ValueError(f"Unknown source: {source}")
-
-print(f"Raw records fetched: {raw_df.count() if source != 'auto_loader' else 'streaming'}")
 
 # COMMAND ----------
 
@@ -262,7 +386,13 @@ validated_df = (
     .withColumn("source", F.lit(source))
 )
 
-# Count validation failures
+# Cache the raw read, not the validated view: five actions below trace back to it (both
+# counts, the MERGE, the distinct-ticker collect), and uncached each one re-fetches or
+# re-serialises the whole source. Caching upstream materialises it once and leaves the
+# validation filters -- which are cheap -- to re-run over the cached rows.
+if source != "auto_loader":
+    raw_df.cache()
+
 total_raw = raw_df.count()
 total_valid = validated_df.count()
 validation_failures = total_raw - total_valid
@@ -328,7 +458,7 @@ WHERE run_id = '{run_id}'
 """)
 
 print(f"\nPipeline run {run_id} completed successfully.")
-print(f"  Tickers: {tickers_processed}")
+print(f"  Tickers: {len(tickers_processed)} of {len(tickers)} requested")
 
 # COMMAND ----------
 
@@ -337,19 +467,32 @@ print(f"  Tickers: {tickers_processed}")
 
 # COMMAND ----------
 
-summary = spark.sql(f"""
+# Whole-table shape first, then the symbols that look wrong. Eyeballing a 500-row
+# per-ticker listing after every run is not verification.
+display(spark.sql(f"""
 SELECT
-    ticker,
-    COUNT(*) as row_count,
+    COUNT(*) as total_rows,
+    COUNT(DISTINCT ticker) as tickers,
     MIN(date) as earliest_date,
     MAX(date) as latest_date,
     MAX(ingested_at) as last_ingested
 FROM {target_table}
-GROUP BY ticker
-ORDER BY ticker
-""")
+"""))
 
-display(summary)
+display(spark.sql(f"""
+WITH latest AS (SELECT MAX(date) AS market_date FROM {target_table})
+SELECT
+    p.ticker,
+    COUNT(*) as row_count,
+    MIN(p.date) as earliest_date,
+    MAX(p.date) as latest_date,
+    MAX(p.ingested_at) as last_ingested
+FROM {target_table} p
+CROSS JOIN latest l
+GROUP BY p.ticker, l.market_date
+HAVING MAX(p.date) < DATE_SUB(l.market_date, 4)
+ORDER BY latest_date, p.ticker
+"""))
 
 # COMMAND ----------
 
@@ -358,10 +501,12 @@ display(summary)
 
 # COMMAND ----------
 
+# Ticker count, not the list: the run-output panel in the Workflows UI truncates a
+# 500-element array into uselessness, and pipeline_runs.tickers_processed has the detail.
 dbutils.notebook.exit(json.dumps({
     "run_id": run_id,
     "status": "succeeded",
     "rows_processed": total_valid,
     "rows_failed": validation_failures,
-    "tickers": tickers_processed,
+    "tickers": len(tickers_processed),
 }))
