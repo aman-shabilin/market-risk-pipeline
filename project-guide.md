@@ -29,9 +29,17 @@ source (S3 / Yahoo / Auto Loader)  ->  Spark validation  ->  Delta Lake (MERGE) 
 ## Current Status and Roadmap
 
 **Read this section first.** It is the handover point for a new session. Last
-updated 2026-08-30. Items 4, 5 and 6 are all merged into `main` (PR #1, merge
-commit `445dfd3`); what remains on item 6 is running the backfill on Databricks,
-not writing code — see *Item 6 in detail* for the runbook.
+updated 2026-08-30. Items 4, 5 and 6 are merged into `main` (PR #1, merge commit
+`445dfd3`), followed by four fixes that *executing* the item 6 runbook forced out
+— PRs #3, #4, #5 and #6, with `main` now at `c5d6812`. Each closed a gap between
+what this document asserted and what a real workspace does: a step described as
+idempotent that aborted on a second run (#3), an undocumented dependency step
+(#4), a fix built on an API serverless rejects (#5), and a reaper inventing
+timestamps (#6). Worth knowing before trusting the parts not yet executed.
+
+What remains on item 6 is running the backfill itself. Steps 1 and 2 of its
+runbook are done; step 3 has been attempted and produced the wrong data. See
+*Item 6 in detail* for the runbook and exactly where it stands.
 
 The project is being worked through a **portfolio-readiness plan**: the code was
 already sound, but the repository did not *present* as sound to someone spending
@@ -49,6 +57,9 @@ by technical interest.
 | GitHub Actions CI | **green** on `main` |
 | Repo | public, `github.com/aman-shabilin/market-risk-pipeline` |
 | Databricks | job runs daily on schedule; last observed run 3m42s, 62,234 rows read / 7,576 written |
+| `market_prices` | 24,968 rows, 10 tickers, 2006-09-05 → 2026-08-28 — item 6's backfill has **not** landed |
+| `ticker_universe` | 503 rows, 503 active — seeded and verified |
+| `pipeline_runs` | audit table repaired 2026-08-30; longest genuine (`succeeded`) task 123s |
 
 ### Working conventions
 
@@ -65,7 +76,10 @@ by technical interest.
 - **Branch, then PR.** Solo project, but `main` is not written to directly any
   more: work happens on a branch (a `git worktree` under `.claude/worktrees/` when
   several things are in flight), which goes up as a PR and gets merged. Items 4-6
-  went through PR #1 this way. Never force-push, and never push to `main`.
+  went through PR #1 this way, and each fix since has been its own small PR
+  (#3-#6) rather than one batch — when a runbook is failing step by step, a PR per
+  cause keeps the reason for each change legible afterwards. Never force-push, and
+  never push to `main`.
 - Notebook changes cannot be covered by the test suite; verify them with
   `python -m py_compile` and by reading.
 
@@ -78,7 +92,7 @@ by technical interest.
 | 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
 | 4 | Split `spark_exercises/` into its own repository | **done** — `9c10679`, `0963bcf` |
 | 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** — `d7e9314` |
-| 6 | Backfill a realistic data volume and publish timings | **code done, run pending** — `2909697` |
+| 6 | Backfill a realistic data volume and publish timings | **code done + 4 fixes merged; backfill still to run** — `2909697`, PRs #3-#6 |
 | 7 | Add a dbt or Airflow layer | **not started — next** |
 
 Items 1-3 existed because a public repo with a red CI badge and no visual
@@ -109,7 +123,13 @@ repositories link to each other — this one from its README's *Related* section
 `databricks/notebooks/02_compute_risk_metrics.py` carried one correctness bug and
 three quality problems. All five points below are now fixed. The notebook is not
 covered by the test suite, so this was verified by `python -m py_compile` and by
-reading — **it has not yet been run on Databricks.** Watch the next scheduled run.
+reading.
+
+Point 3 was then reworked, because the `.cache()` it originally used is rejected
+outright on serverless (PR #5). **02 has not been re-run on Databricks since that
+rework** — `pipeline_runs` holds `metrics` rows from before it, so their presence
+proves nothing. Check for a `metrics` row with `started_at` after
+`2026-08-30 11:00 UTC` before treating the current version as exercised.
 
 1. **Row ordering inside the grouped-map function** (the bug). The function takes
    `dates[0]` / `dates[-1]` as the metric window bounds and runs `np.cumprod` for
@@ -155,8 +175,19 @@ grouped-map framing — distributing that work was not yet justified by the data
 - **Yahoo symbol convention.** Share classes take a dash, not a dot: `BRK-B`,
   `BF-B`. The seed list already uses the dash form.
 
-Nothing here has run on Databricks yet. It was verified by `py_compile`, by a
-lint comparison against the previous commit, and by reading.
+**What has actually run on Databricks** (as of 2026-08-30):
+
+| Notebook | State |
+|----------|-------|
+| `setup_delta_tables` | run clean, re-runnable since PR #3 |
+| `seed_ticker_universe` | run clean — 503 rows, 503 active |
+| `01_ingest_market_data` | ran and **succeeded** post-PR #5, but with the wrong parameters — see the widget trap in step 3 |
+| `02_compute_risk_metrics` | **not re-run since PR #5** |
+| `03_data_quality_checks` | **not re-run since PR #5** |
+
+So the serverless-compatible version of `01` is exercised; `02` and `03` are still
+only `py_compile`-and-read, verified the same way as before plus a lint comparison
+against the previous commit.
 
 **What the scale change actually required.** The interesting part was not the
 volume, it was that 503 tickers and 20 years broke assumptions that 10 tickers
@@ -214,39 +245,72 @@ and 30 days had hidden:
    600→1800, metrics 1200→2400) and the ingest task now passes
    `ticker_source=table`.
 
-**The backfill runbook** (not yet executed):
+**The backfill runbook.** Steps 1 and 2 are **done**; step 3 is the outstanding
+work. Every `# DONE` / `# TODO` marker below reflects the state on 2026-08-30.
 
 ```bash
-# 1. Create the new table (idempotent; re-running setup is safe)
+# 1. DONE -- Create the new table (idempotent; re-running setup is safe)
 #    Open databricks/config/setup_delta_tables.py → Run All
 #    CHECK constraints go through ensure_check_constraint(), which skips ones
 #    already on the table -- ADD CONSTRAINT has no IF NOT EXISTS form, and a
 #    second run used to abort on DELTA_CONSTRAINT_ALREADY_EXISTS before it
 #    reached the ticker_universe cell.
 
-# 2. Seed the universe — 503 rows, one MERGE
+# 2. DONE -- Seed the universe — 503 rows, one MERGE
 #    Open databricks/config/seed_ticker_universe.py → Run All
 #    Verify: the last cell groups by sector; expect ~11 sectors, ~503 active
+#    NOTE: the "Constituents: 503" line prints len() of the hardcoded Python list
+#    *before* the MERGE, so it only proves the list is intact. Confirm the table
+#    itself: SELECT COUNT(*), SUM(active::int) FROM ...ticker_universe
 
-# 3. One-off backfill: run the ingest notebook alone, not the job
+# 3. TODO -- One-off backfill: run the ingest notebook alone, not the job
 #    FIRST: add yfinance to the notebook's Environment panel and Apply.
 #    yfinance is declared in the job's serverless environment (see "Serverless
 #    dependencies" below), which an interactive run does not inherit -- without
 #    this the import fails with ModuleNotFoundError.
 #    Then set widgets:
-#      ticker_source  = table
+#      ticker_source  = table       # <-- see the widget trap below
 #      lookback_days  = 7300        # 20 years
 #      fetch_chunk_size = 25
 #    Expect ~21 chunk fetches. Yahoo is the slow part, not Spark.
+#    GATE: run the first cell alone and confirm it prints "Tickers: 503 from
+#    table". If it says "from widget", the dropdown did not take -- fix it and
+#    re-run that cell rather than trusting the panel.
 
-# 4. Then run the job normally; lookback_days=30 keeps it incremental
+# 4. TODO -- Then run the job normally; lookback_days=30 keeps it incremental
 databricks jobs run-now --job-id <JOB_ID>
 ```
+
+**The widget trap — how step 3 failed the first time.** Databricks persists a
+notebook's *last used* widget values, and a newly added widget silently keeps its
+own default rather than prompting. `ticker_source` was added in item 6 with
+default `widget`, so an existing notebook picked up the new `lookback_days=7300`
+while quietly ignoring `ticker_source=table`: the run "succeeded", took 14
+seconds, and wrote 23,698 rows for **5** tickers — the default `tickers` string —
+instead of 503.
+
+Nothing errored, which is why this is worth writing down. What caught it was
+`pipeline_runs.parameters`, the per-run JSON added in item 6:
+
+```json
+{"source": "yahoo", "ticker_source": "widget", "ticker_count": 5,
+ "lookback_days": 7300, "fetch_chunk_size": 25}
+```
+
+That is the argument for recording run parameters in the audit table at all: a
+run that silently does the wrong thing is indistinguishable from a correct one
+until you can read back what it was asked to do. The `Tickers: N from <source>`
+line in the first cell exists for the same reason — check it before Run All.
 
 **Timings to publish once it has run.** Before: 3m42s, 62,234 rows read / 7,576
 written, 10 tickers. After: _pending_ — record wall-clock per task, rows read and
 written, and `computed_metrics` row count. The comparison is the deliverable of
 item 6; the code change is only what makes it possible.
+
+Read those durations from `pipeline_runs` rows with `status = 'succeeded'` only.
+A `failed` row's `finished_at` was written by the reaper, not by the run itself,
+so its duration is the interval to the *next* run's start — plausible-looking and
+meaningless. See *Design Decisions → Databricks → 5*.
 
 ### Confidentiality constraint on screenshots
 
@@ -849,7 +913,7 @@ curl -X DELETE http://localhost:8000/api/v1/portfolios/tech
 2. **Liquid Clustering over partitioning** - Better for the query patterns (filter by ticker + date range) without partition skew
 3. **Pandas UDFs over Spark native** - Complex financial math (VaR percentile, CVaR tail mean, drawdown) is cleaner in NumPy; Pandas UDFs let Spark distribute it
 4. **Separate quality check step** - Runs between ingest and metrics so bad data never feeds into metric computation; quality failures don't block the pipeline (soft gate)
-5. **Pipeline run auditing** - Every execution writes to `pipeline_runs` enabling SLA tracking and failure investigation from the dashboard. Because a notebook that raises stops at the failing cell and never reaches its own completion update, each notebook first reaps rows left stranded at `running` by an earlier run of the same `run_type` (safe because the job pins `max_concurrent_runs` to 1). Without this the success-rate tile drifts down while `failed_runs` stays at zero
+5. **Pipeline run auditing** - Every execution writes to `pipeline_runs` enabling SLA tracking and failure investigation from the dashboard. Because a notebook that raises stops at the failing cell and never reaches its own completion update, each notebook first reaps rows left stranded at `running` by an earlier run of the same `run_type` (safe because the job pins `max_concurrent_runs` to 1). Without this the success-rate tile drifts down while `failed_runs` stays at zero. The reaper leaves `finished_at` **NULL** rather than stamping `current_timestamp()`: the finish time is genuinely unknown, and stamping the reap time dates the failure to whenever the next run started. The first version did stamp it, and produced eight rows reported as 6.8-day runs — enough to dominate any duration chart on the dashboard, which is where item 6's timings are read from. NULL propagates through `TIMESTAMPDIFF` and drops the row out of the series instead (PR #6; the eight rows were repaired in place on 2026-08-30)
 6. **Quality scoring (0-1)** - Normalized scores enable trending and alerting thresholds without hard-coding check-specific logic
 7. **Notebook parameters via widgets** - Same notebook handles dev (manual widget input) and production (workflow-injected parameters)
 8. **Change Data Feed enabled** - Downstream consumers (streaming jobs, BI tools) can subscribe to incremental changes without full table scans
