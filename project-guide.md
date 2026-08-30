@@ -123,11 +123,13 @@ reading — **it has not yet been run on Databricks.** Watch the next scheduled 
    The plain function keeps the same closure over `risk_free_rate`, and the output
    column order still matches `metrics_schema` positionally, so the result is
    identical under either column-matching mode.
-3. **`metrics_clean` is now cached** and its count taken once into
-   `metrics_count`. Four actions consume that DataFrame (count, display, MERGE,
-   run-audit collect); previously each re-ran the whole DAG, which also meant the
-   `computed_at` and `computation_duration_ms` values shown differed from the ones
-   merged.
+3. **The grouped map now runs once.** Four actions used to consume
+   `metrics_clean` (count, display, MERGE, run-audit collect) and each re-ran the
+   whole DAG, so the `computed_at` and `computation_duration_ms` values shown
+   differed from the ones merged. This was first fixed with `.cache()`, which
+   serverless rejects — see *Serverless compute rejects `.cache()`* below for the
+   shape it settled on: the MERGE is the only consumer, and the count, display
+   and ticker list read the gold table afterwards.
 4. **The duplicated rolling logic is down to one definition.** The unused
    `rolling_metrics_df` is gone and the `v_rolling_metrics` view is the single
    source. The view now also excludes the 21-day warmup rows, which the deleted
@@ -178,8 +180,6 @@ and 30 days had hidden:
    returns `None` to distinguish "no data" from "bad data".
 3. **Each chunk goes to Spark as it arrives**, unioned at the end, instead of one
    `pd.concat` of everything. The driver has no reason to hold 2.5M rows.
-   `validated_df` is now cached, because four things read it (two counts, the
-   MERGE, the distinct-ticker collect).
 4. **The metrics window is now trailing, not "all history"**
    (`metrics_window_days`, default 365, in `02_compute_risk_metrics.py`). Over 20
    years the old code reported a 2006–2026 volatility as today's risk and pinned
@@ -196,7 +196,7 @@ and 30 days had hidden:
    scored over 20 years, the outlier rate is dominated by 2008 and 2020 and a bad
    ingest today cannot move a denominator of 5,000 points, while `>5`-day gaps
    accumulate legitimately around holidays until every symbol scores 0.2 and the
-   check distinguishes nothing. `all_scores` is cached before the MERGE.
+   check distinguishes nothing.
 6. **Every dashboard tile is now bounded**
    (`databricks/sql/dashboard_queries.sql`). Each `computed_metrics` tile reduces
    to the latest snapshot per ticker with `QUALIFY ROW_NUMBER() OVER (PARTITION BY
@@ -675,6 +675,41 @@ tile is not a chart, and the table holds one row per ticker per window.
 - PySpark RDDs are not supported — use DataFrame `.collect()` instead of `.rdd.flatMap()`
 - Persistent views cannot reference temp views — use source table queries directly
 - Column `DEFAULT` values require `delta.feature.allowColumnDefaults` (removed from DDL)
+- `DataFrame.cache()` / `.persist()` are rejected — see below
+
+#### Serverless compute rejects `.cache()`
+
+```
+[NOT_SUPPORTED_WITH_SERVERLESS] PERSIST TABLE is not supported on
+serverless compute. SQLSTATE: 0A000
+```
+
+All three notebooks originally used `.cache()` to keep a DataFrame consumed by
+several actions from being recomputed each time. On a serverless-only workspace
+that option does not exist, so each notebook instead **asks fewer questions of
+the expensive DataFrame**, which is a better fix than materialising it anyway:
+
+- **`01_ingest_market_data`** — the two row counts became one aggregation that
+  sums the validity predicate as an integer (`IS_VALID_ROW`, defined once and used
+  both to filter and to count, so the filter and its own failure count cannot
+  drift). The distinct-ticker collect reads `market_prices` instead of the fetched
+  DataFrame: the MERGE has already written those rows, and both `ingested_at` and
+  `run_start` come from the driver clock, so `>= run_start` isolates this run
+  without trusting executor clocks.
+- **`02_compute_risk_metrics`** — the MERGE is the only consumer of the grouped
+  map; the count, display and ticker list read the gold table afterwards. One
+  `applyInPandas` execution instead of four. `computed_at` is now a single
+  driver-side timestamp closed over by `compute_metrics` rather than
+  `pd.Timestamp.now()` per group — that is what makes the read-back exact, and it
+  also stops `computed_at` smearing across the run's duration. Per-group timing
+  stays in `computation_duration_ms`.
+- **`03_data_quality_checks`** — the score count comes from
+  `data_quality_scores` after the MERGE rather than from the unioned DataFrame,
+  which would have re-run all four checks including the rolling-window outlier
+  scan.
+
+The general rule: on serverless, treat a Delta write as the materialization point
+and read back from the table, rather than reaching for `.cache()`.
 
 ---
 
