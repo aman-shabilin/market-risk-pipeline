@@ -219,6 +219,10 @@ and 30 days had hidden:
 ```bash
 # 1. Create the new table (idempotent; re-running setup is safe)
 #    Open databricks/config/setup_delta_tables.py → Run All
+#    CHECK constraints go through ensure_check_constraint(), which skips ones
+#    already on the table -- ADD CONSTRAINT has no IF NOT EXISTS form, and a
+#    second run used to abort on DELTA_CONSTRAINT_ALREADY_EXISTS before it
+#    reached the ticker_universe cell.
 
 # 2. Seed the universe — 503 rows, one MERGE
 #    Open databricks/config/seed_ticker_universe.py → Run All
