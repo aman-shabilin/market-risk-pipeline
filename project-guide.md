@@ -80,7 +80,7 @@ market-risk-pipeline/
 | Testing | pytest, httpx, moto | Notebook unit tests + quality checks |
 | Linting | ruff, mypy --strict | — |
 | CI | GitHub Actions | Databricks Repos (Git sync) |
-| Deployment | Docker + docker-compose | Workflow JSON + Service Principal |
+| Deployment | Docker + docker-compose | Workflow JSON (Databricks CLI) |
 
 ### Source Layout
 
@@ -354,7 +354,7 @@ databricks/
 | **Parameterized Notebooks** | `dbutils.widgets` for configurable runs without code changes |
 | **Pipeline Auditing** | `pipeline_runs` table tracks every execution with status, duration, row counts |
 | **Data Quality Framework** | Scoring system (0-1) across 4 dimensions, stored for trending |
-| **Service Principal** | Workflow runs as a service principal for production security |
+| **Scheduled Execution** | Cron trigger on serverless, launched by the scheduler (not manual runs) |
 | **SQL Dashboard** | 15+ ready-to-import queries covering ops, quality, metrics, and inventory |
 
 ### Delta Lake Tables
@@ -467,6 +467,7 @@ The `spark_exercises/` directory contains PySpark data cleansing exercises unrel
 2. **No DLT (Delta Live Tables)** - Could replace notebooks for declarative pipeline with expectations
 3. **No MLflow integration** - Could version metric models and track drift
 4. **Dashboard requires manual setup** - SQL queries need to be imported manually (no Terraform/API automation yet)
+5. **Runs as a user, not a service principal** - The job's `run_as` is the creating user. A service principal would give a non-human audit identity and least-privilege access
 
 ---
 
@@ -549,4 +550,4 @@ curl -X DELETE http://localhost:8000/api/v1/portfolios/tech
 6. **Quality scoring (0-1)** - Normalized scores enable trending and alerting thresholds without hard-coding check-specific logic
 7. **Notebook parameters via widgets** - Same notebook handles dev (manual widget input) and production (workflow-injected parameters)
 8. **Change Data Feed enabled** - Downstream consumers (streaming jobs, BI tools) can subscribe to incremental changes without full table scans
-9. **Service principal execution** - Workflow runs as a non-human identity for audit trail and least-privilege access
+9. **Scheduled, not manual** - The job is cron-triggered so runs are reproducible and the audit log reflects real scheduled execution rather than ad-hoc invocations. It currently runs as the creating user; moving to a service principal is listed under known gaps

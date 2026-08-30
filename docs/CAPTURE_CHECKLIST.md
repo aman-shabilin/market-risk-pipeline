@@ -20,13 +20,23 @@ matching `![...]` lines in the README's *Databricks deployment* section.
 
 ## The captures
 
-| File | Where | What it should show |
-| --- | --- | --- |
-| `01-workflow-run-graph.png` | Workflows → job → a successful run | The three-task DAG green end to end, with per-task durations visible |
-| `02-job-run-history.png` | Workflows → job → Runs tab | Several dated runs with status and duration, evidencing the schedule |
-| `03-risk-metrics-dashboard.png` | Dashboard, Risk Metrics section | Metrics table plus the volatility bar chart and risk-return scatter |
-| `04-quality-scorecard.png` | Dashboard, Data Quality section | Ticker × check-name heatmap of 0–1 scores |
-| `05-unity-catalog-lineage.png` | Catalog Explorer → `market_prices` → Lineage | Lineage from `market_prices` through to `computed_metrics` |
+| File | Status | Where | What it shows |
+| --- | --- | --- | --- |
+| `01-workflow-run-graph.png` | captured | Workflows → job → a successful run | Three-task DAG green on serverless, 3m42s, launched by scheduler |
+| `02-job-run-history.png` | captured | Workflows → job → Runs tab | Five consecutive scheduled successes plus the earlier debugging failures |
+| `03-rolling-volatility-dashboard.png` | captured | Dashboard → Risk Analytics tab | 21-day rolling volatility across ten tickers |
+| `04-unity-catalog-lineage.png` | captured | Job run details → Lineage | Three upstream and four downstream tables |
+| `05-quality-scorecard.png` | **outstanding** | Dashboard → Operations tab | Ticker × check-name heatmap of 0–1 quality scores |
+
+Known nits to fix on the next pass:
+
+- `03` has a y-axis reading `Sum of rolling_vol_pct`. That is the Databricks
+  default aggregation showing through. One row per (ticker, date) means the sum
+  equals the value so the chart is correct, but the label reads as an unfixed
+  default. Set the aggregation to none, or rename the axis, then re-capture.
+- `02` shows the account email in *Creator* and *Run as*. Same address is already
+  in `databricks/workflows/market_risk_pipeline.json`, so it is not new exposure,
+  but crop it out if you would rather not publish it.
 
 Captions should state what the image *proves*, not what it is — "three-task DAG
 on serverless, 2m14s end to end" rather than "workflow screenshot".

@@ -269,20 +269,45 @@ full deployment instructions and feature details.
 
 ### Orchestration
 
-The workflow runs weekdays at 18:00 ET after market close, with retries on
-ingestion and email alerts on failure.
+The workflow runs weekdays after market close, with retries on ingestion and
+email alerts on failure. Three tasks run on serverless compute in dependency
+order, end to end in well under four minutes:
 
-<!-- Capture per docs/CAPTURE_CHECKLIST.md, then uncomment:
-![Three-task DAG green end to end on serverless compute](docs/img/01-workflow-run-graph.png)
+![Databricks job run graph: ingest_market_data, data_quality_checks and compute_risk_metrics all succeeded on serverless compute, 3m42s end to end, launched by the scheduler](docs/img/01-workflow-run-graph.png)
 
-![Scheduled run history with per-run duration and status](docs/img/02-job-run-history.png)
--->
+That run read 62,234 rows and wrote 7,576 across 38 queries. Note *Launched: By
+scheduler* — the cron trigger fires on its own rather than the run being kicked
+off by hand.
+
+![Job run history: five consecutive scheduler-launched runs succeeded at 3m40s to 4m2s, preceded by the failed runs from initial serverless debugging](docs/img/02-job-run-history.png)
+
+The red bars are real: they are the runs it took to work through the serverless
+constraints documented in `project-guide.md` (no RDD APIs, no persistent views
+over temp views, no column DEFAULT values).
 
 Every execution writes a row to `pipeline_runs` with status, duration, row
 counts and captured errors. A run that dies mid-notebook never reaches its own
 completion update, so each notebook reaps rows left stranded at `running` by a
 previous run before registering its own — otherwise the dashboard success rate
 would drift down silently while `failed_runs` stayed at zero.
+
+### Risk metrics
+
+The dashboard is organised into three tabs — Operations (pipeline health and
+data quality), Risk Analytics (metrics and rolling series), and Data & Platform
+(coverage and Delta operations):
+
+![Databricks SQL Dashboard showing 21-day rolling annualised volatility for ten tickers from June to August 2026](docs/img/03-rolling-volatility-dashboard.png)
+
+Rolling volatility comes from a Spark window function over `market_prices`,
+exposed as the `v_rolling_metrics` view.
+
+### Lineage
+
+Delta tables carry column comments, CHECK constraints and Change Data Feed, so
+Unity Catalog captures lineage automatically from the job:
+
+![Unity Catalog lineage for the job: three upstream tables read and four downstream tables written, all under the market_risk.analytics namespace](docs/img/04-unity-catalog-lineage.png)
 
 ### Data quality
 
@@ -291,20 +316,8 @@ ticker from 0 to 1 into `data_quality_scores`, making quality trendable rather
 than a pass/fail assertion.
 
 <!-- Capture per docs/CAPTURE_CHECKLIST.md, then uncomment:
-![Ticker by check-name heatmap of quality scores](docs/img/04-quality-scorecard.png)
+![Ticker by check-name heatmap of quality scores](docs/img/05-quality-scorecard.png)
 -->
-
-### Risk metrics
-
-<!-- Capture per docs/CAPTURE_CHECKLIST.md, then uncomment:
-![Current risk metrics, volatility comparison and risk-return scatter](docs/img/03-risk-metrics-dashboard.png)
-
-![Unity Catalog lineage from market_prices through to computed_metrics](docs/img/05-unity-catalog-lineage.png)
--->
-
-Delta tables carry column comments, CHECK constraints and Change Data Feed, so
-Unity Catalog renders end-to-end lineage from ingestion through to the Gold
-metrics table.
 
 ## Development
 
@@ -332,3 +345,4 @@ your local config.
 ### Databricks
 - Batch-only (no Structured Streaming for real-time).
 - Dashboard requires manual setup (no Terraform/API automation yet).
+- The job runs as the creating user rather than a service principal.

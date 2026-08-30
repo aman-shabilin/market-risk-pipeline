@@ -29,3 +29,6 @@ uv.lock
 
 # Generated output
 output/
+
+# macOS
+.DS_Store
