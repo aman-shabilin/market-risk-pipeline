@@ -29,8 +29,9 @@ source (S3 / Yahoo / Auto Loader)  ->  Spark validation  ->  Delta Lake (MERGE) 
 ## Current Status and Roadmap
 
 **Read this section first.** It is the handover point for a new session. Last
-updated 2026-08-30, after the item 6 code landed (the backfill run itself is
-still pending — see *Item 6 in detail*).
+updated 2026-08-30. Items 4, 5 and 6 are all merged into `main` (PR #1, merge
+commit `445dfd3`); what remains on item 6 is running the backfill on Databricks,
+not writing code — see *Item 6 in detail* for the runbook.
 
 The project is being worked through a **portfolio-readiness plan**: the code was
 already sound, but the repository did not *present* as sound to someone spending
@@ -61,7 +62,10 @@ by technical interest.
   both are inherent to the notebook format rather than real defects. Bringing
   `databricks/` under the gate would mean configuring those away first.
 - **Commit messages carry no `Co-Authored-By` trailer.**
-- Work happens directly on `main` (solo project, no PR flow).
+- **Branch, then PR.** Solo project, but `main` is not written to directly any
+  more: work happens on a branch (a `git worktree` under `.claude/worktrees/` when
+  several things are in flight), which goes up as a PR and gets merged. Items 4-6
+  went through PR #1 this way. Never force-push, and never push to `main`.
 - Notebook changes cannot be covered by the test suite; verify them with
   `python -m py_compile` and by reading.
 
@@ -72,9 +76,9 @@ by technical interest.
 | 1 | Fix the failing CI (5 ruff errors, 1 mypy error) | **done** — `fbca5ef` |
 | 2 | Mermaid architecture diagram + screenshot scaffolding | **done** — `3b7dc04` |
 | 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
-| 4 | Split `spark_exercises/` into its own repository | **done** |
-| 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** |
-| 6 | Backfill a realistic data volume and publish timings | **code done, run pending** |
+| 4 | Split `spark_exercises/` into its own repository | **done** — `9c10679`, `0963bcf` |
+| 5 | Fix `02_compute_risk_metrics.py` (see below) | **done** — `d7e9314` |
+| 6 | Backfill a realistic data volume and publish timings | **code done, run pending** — `2909697` |
 | 7 | Add a dbt or Airflow layer | **not started — next** |
 
 Items 1-3 existed because a public repo with a red CI badge and no visual
