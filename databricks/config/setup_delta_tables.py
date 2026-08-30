@@ -40,6 +40,54 @@ spark.sql(f"USE SCHEMA {schema}")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Helpers
+# MAGIC
+# MAGIC This notebook is meant to be safe to re-run — it is the first step of the
+# MAGIC backfill runbook and of any fresh workspace setup. Every `CREATE TABLE` below
+# MAGIC already carries `IF NOT EXISTS`, but `ALTER TABLE ... ADD CONSTRAINT` has no
+# MAGIC such form, so a second run against existing tables used to abort on
+# MAGIC `DELTA_CONSTRAINT_ALREADY_EXISTS` partway through — leaving the later tables
+# MAGIC uncreated.
+
+# COMMAND ----------
+
+def ensure_check_constraint(table, name, expr):
+    """Add a CHECK constraint to `table` unless it is already defined.
+
+    Delta records CHECK constraints as table properties keyed
+    `delta.constraints.<name>`, which is the only way to ask whether one exists
+    without parsing an error message. Names are compared lowercased because Delta
+    stores them that way regardless of how they were written.
+
+    An existing constraint with the same name but a different expression is left
+    alone and reported, rather than silently dropped and re-added: rewriting a
+    constraint re-validates it against every row in the table, which is not
+    something a setup notebook should do to a populated table by surprise.
+    """
+    prop = f"delta.constraints.{name.lower()}"
+    existing = {
+        row.key: row.value for row in spark.sql(f"SHOW TBLPROPERTIES {table}").collect()
+    }
+
+    if prop not in existing:
+        spark.sql(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expr})")
+        print(f"  + constraint {name}")
+        return
+
+    if existing[prop].strip() != expr.strip():
+        print(
+            f"  ! constraint {name} exists with a different expression:\n"
+            f"      on table: {existing[prop]}\n"
+            f"      in code:  {expr}\n"
+            f"      To adopt the code version:\n"
+            f"      ALTER TABLE {table} DROP CONSTRAINT {name};"
+        )
+    else:
+        print(f"  = constraint {name} already present")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Market Prices Table (Bronze → Silver)
 
 # COMMAND ----------
@@ -67,18 +115,13 @@ TBLPROPERTIES (
 CLUSTER BY (ticker, date)
 """)
 
-# Add constraint for data integrity
-spark.sql(f"""
-ALTER TABLE {full_schema}.market_prices
-ADD CONSTRAINT valid_price_range CHECK (high >= low AND low > 0)
-""")
-
-spark.sql(f"""
-ALTER TABLE {full_schema}.market_prices
-ADD CONSTRAINT valid_volume CHECK (volume >= 0)
-""")
-
 print("Created: market_prices")
+
+# Constraints for data integrity.
+ensure_check_constraint(
+    f"{full_schema}.market_prices", "valid_price_range", "high >= low AND low > 0"
+)
+ensure_check_constraint(f"{full_schema}.market_prices", "valid_volume", "volume >= 0")
 
 # COMMAND ----------
 
@@ -146,12 +189,11 @@ TBLPROPERTIES ('delta.autoOptimize.optimizeWrite' = 'true')
 CLUSTER BY (portfolio_id)
 """)
 
-spark.sql(f"""
-ALTER TABLE {full_schema}.portfolio_holdings
-ADD CONSTRAINT valid_weight CHECK (weight > 0 AND weight <= 1)
-""")
-
 print("Created: portfolios, portfolio_holdings")
+
+ensure_check_constraint(
+    f"{full_schema}.portfolio_holdings", "valid_weight", "weight > 0 AND weight <= 1"
+)
 
 # COMMAND ----------
 
