@@ -23,11 +23,17 @@ dbutils.widgets.text("catalog", "market_risk", "Catalog")
 dbutils.widgets.text("schema", "analytics", "Schema")
 dbutils.widgets.text("freshness_threshold_hours", "26", "Max hours since last ingest")
 dbutils.widgets.text("completeness_lookback_days", "30", "Completeness check window")
+dbutils.widgets.text("history_lookback_days", "180", "Outlier/gap check window")
+dbutils.widgets.dropdown(
+    "restrict_to_active_universe", "true", ["true", "false"], "Score only active tickers"
+)
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
 freshness_threshold_hours = int(dbutils.widgets.get("freshness_threshold_hours"))
 completeness_lookback_days = int(dbutils.widgets.get("completeness_lookback_days"))
+history_lookback_days = int(dbutils.widgets.get("history_lookback_days"))
+restrict_to_active_universe = dbutils.widgets.get("restrict_to_active_universe") == "true"
 
 full_schema = f"{catalog}.{schema}"
 prices_table = f"{full_schema}.market_prices"
@@ -59,14 +65,62 @@ WHERE run_type = 'quality_check'
   AND status = 'running'
 """)
 
+run_params = json.dumps({
+    "freshness_threshold_hours": freshness_threshold_hours,
+    "completeness_lookback_days": completeness_lookback_days,
+    "history_lookback_days": history_lookback_days,
+    "restrict_to_active_universe": restrict_to_active_universe,
+})
+
 spark.sql(f"""
 INSERT INTO {full_schema}.pipeline_runs
 VALUES (
     '{run_id}', 'quality_check', 'running',
     current_timestamp(), NULL, 0, 0, NULL, NULL,
-    '{json.dumps({"freshness_threshold_hours": freshness_threshold_hours})}'
+    '{run_params}'
 )
 """)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Scope: Which Tickers Get Scored
+# MAGIC
+# MAGIC Every check below reads `scoped_prices` rather than `market_prices` directly.
+# MAGIC A symbol that has left the index is stale by definition, so leaving it in the
+# MAGIC scorecard means the freshness tile shows permanent failures nobody intends to fix
+# MAGIC and the "tickers below threshold" trend never returns to zero. Its price history
+# MAGIC stays in the table; only the scoring ignores it.
+
+# COMMAND ----------
+
+prices_all = spark.table(prices_table)
+scope_note = "all tickers in market_prices"
+
+if restrict_to_active_universe:
+    universe_table = f"{full_schema}.ticker_universe"
+    # Degrades to scoring everything rather than failing: an unseeded universe is a
+    # setup step someone has not run yet, not a reason to lose today's scores.
+    if not spark.catalog.tableExists(universe_table):
+        print(f"WARNING: {universe_table} does not exist -- run setup_delta_tables.")
+        active = spark.createDataFrame([], schema="ticker STRING")
+    else:
+        active = spark.sql(f"SELECT ticker FROM {universe_table} WHERE active")
+
+    if active.isEmpty():
+        print(
+            "WARNING: no active tickers found -- scoring every ticker in market_prices. "
+            "Run databricks/config/seed_ticker_universe to scope this."
+        )
+        prices_scoped = prices_all
+    else:
+        prices_scoped = prices_all.join(active, on="ticker", how="left_semi")
+        scope_note = "active tickers in ticker_universe"
+else:
+    prices_scoped = prices_all
+
+prices_scoped.createOrReplaceTempView("scoped_prices")
+print(f"Scoring scope: {scope_note}")
 
 # COMMAND ----------
 
@@ -79,13 +133,13 @@ VALUES (
 
 from pyspark.sql import functions as F
 
-freshness_df = spark.sql(f"""
+freshness_df = spark.sql("""
 SELECT
     ticker,
     MAX(ingested_at) as last_ingested,
     MAX(date) as latest_date,
     TIMESTAMPDIFF(HOUR, MAX(ingested_at), current_timestamp()) as hours_since_ingest
-FROM {prices_table}
+FROM scoped_prices
 GROUP BY ticker
 """)
 
@@ -129,7 +183,7 @@ WITH date_range AS (
         date,
         LAG(date) OVER (PARTITION BY ticker ORDER BY date) as prev_date,
         DATEDIFF(date, LAG(date) OVER (PARTITION BY ticker ORDER BY date)) as gap_days
-    FROM {prices_table}
+    FROM scoped_prices
     WHERE date >= DATE_SUB(current_date(), {completeness_lookback_days})
 ),
 ticker_stats AS (
@@ -184,8 +238,18 @@ display(completeness_scores)
 
 rolling_window = Window.partitionBy("ticker").orderBy("date").rowsBetween(-20, -1)
 
+# Bounded to a recent window, with extra days ahead of it to warm the 20-row rolling
+# window up. Scored over all 20 years instead, the rate is dominated by 2008 and 2020:
+# a symbol carries those outliers forever, and today's bad ingest moves a denominator of
+# 5,000 points too little to change the score. Quality is a statement about now.
+OUTLIER_WARMUP_DAYS = 45
+
+outlier_source = spark.table("scoped_prices").filter(
+    F.col("date") >= F.date_sub(F.current_date(), history_lookback_days + OUTLIER_WARMUP_DAYS)
+)
+
 outlier_df = (
-    spark.table(prices_table)
+    outlier_source
     .withColumn("rolling_mean", F.avg("close").over(rolling_window))
     .withColumn("rolling_std", F.stddev("close").over(rolling_window))
     .filter(F.col("rolling_std").isNotNull() & (F.col("rolling_std") > 0))
@@ -193,6 +257,7 @@ outlier_df = (
         (F.col("close") - F.col("rolling_mean")) / F.col("rolling_std")
     ))
     .withColumn("is_outlier", F.col("z_score") > 3.0)
+    .filter(F.col("date") >= F.date_sub(F.current_date(), history_lookback_days))
 )
 
 outlier_stats = (
@@ -238,6 +303,10 @@ display(outlier_scores)
 
 # COMMAND ----------
 
+# Same window as the outlier check, and for the same reason: a >5-day gap happens
+# legitimately around a few holidays, so over 20 years every symbol accumulates enough of
+# them to score 0.2 and the check stops distinguishing anything. The widest gap in the
+# window is kept because it is what an operator actually looks at.
 gap_df = spark.sql(f"""
 WITH gaps AS (
     SELECT
@@ -245,17 +314,14 @@ WITH gaps AS (
         date,
         LAG(date) OVER (PARTITION BY ticker ORDER BY date) as prev_date,
         DATEDIFF(date, LAG(date) OVER (PARTITION BY ticker ORDER BY date)) as gap_days
-    FROM {prices_table}
+    FROM scoped_prices
+    WHERE date >= DATE_SUB(current_date(), {history_lookback_days})
 )
 SELECT
     ticker,
     COUNT(CASE WHEN gap_days > 5 THEN 1 END) as large_gaps,
     COUNT(*) as total_transitions,
-    COLLECT_LIST(
-        CASE WHEN gap_days > 5
-        THEN CONCAT(CAST(prev_date AS STRING), ' to ', CAST(date AS STRING), ' (', CAST(gap_days AS STRING), 'd)')
-        END
-    ) as gap_details
+    MAX(gap_days) as widest_gap_days
 FROM gaps
 WHERE prev_date IS NOT NULL
 GROUP BY ticker
@@ -274,7 +340,8 @@ gap_scores = (
     .withColumn("checked_at", F.current_timestamp())
     .withColumn("details", F.to_json(F.struct(
         F.col("large_gaps"),
-        F.col("total_transitions")
+        F.col("total_transitions"),
+        F.col("widest_gap_days")
     )))
     .select("check_date", "ticker", "check_name", "score", "details", "checked_at")
 )
@@ -295,6 +362,11 @@ all_scores = (
     .union(outlier_scores)
     .union(gap_scores)
 )
+
+# Cached before the MERGE reads it, because the count below reads it again and the four
+# checks behind it are not cheap to redo -- the outlier check alone is a rolling window
+# over every scoped ticker's recent history.
+all_scores.cache()
 
 all_scores.createOrReplaceTempView("new_scores")
 

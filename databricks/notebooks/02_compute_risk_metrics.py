@@ -23,11 +23,13 @@ dbutils.widgets.text("catalog", "market_risk", "Catalog")
 dbutils.widgets.text("schema", "analytics", "Schema")
 dbutils.widgets.text("risk_free_rate", "0.02", "Risk-Free Rate (annualized)")
 dbutils.widgets.text("min_price_points", "30", "Minimum price points required")
+dbutils.widgets.text("metrics_window_days", "365", "Trailing window (calendar days)")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
 risk_free_rate = float(dbutils.widgets.get("risk_free_rate"))
 min_price_points = int(dbutils.widgets.get("min_price_points"))
+metrics_window_days = int(dbutils.widgets.get("metrics_window_days"))
 
 full_schema = f"{catalog}.{schema}"
 prices_table = f"{full_schema}.market_prices"
@@ -38,6 +40,7 @@ spark.sql(f"USE SCHEMA {schema}")
 
 print(f"Risk-free rate: {risk_free_rate}")
 print(f"Min price points: {min_price_points}")
+print(f"Trailing window: {metrics_window_days} calendar days")
 
 # COMMAND ----------
 
@@ -48,7 +51,7 @@ print(f"Min price points: {min_price_points}")
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 run_id = str(uuid.uuid4())
 
@@ -62,12 +65,18 @@ WHERE run_type = 'metrics'
   AND status = 'running'
 """)
 
+run_params = json.dumps({
+    "risk_free_rate": risk_free_rate,
+    "min_price_points": min_price_points,
+    "metrics_window_days": metrics_window_days,
+})
+
 spark.sql(f"""
 INSERT INTO {full_schema}.pipeline_runs
 VALUES (
     '{run_id}', 'metrics', 'running',
     current_timestamp(), NULL, 0, 0, NULL, NULL,
-    '{json.dumps({"risk_free_rate": risk_free_rate, "min_price_points": min_price_points})}'
+    '{run_params}'
 )
 """)
 
@@ -83,22 +92,37 @@ from pyspark.sql.window import Window
 
 prices_df = spark.table(prices_table)
 
+# Metrics come from a trailing window, not the whole table. Over 20 years of history the
+# untrimmed version reports a 2006-2026 volatility as today's risk -- an average across
+# two crises and several regimes -- and pins window_start to 2006 forever while
+# window_end creeps forward. Anchored on the table's own latest date rather than
+# current_date(), so the window is still the intended length when ingestion is behind.
+latest_date = prices_df.agg(F.max("date")).collect()[0][0]
+if latest_date is None:
+    raise ValueError(f"{prices_table} is empty -- run 01_ingest_market_data first")
+
+window_floor = latest_date - timedelta(days=metrics_window_days)
+prices_windowed = prices_df.filter(F.col("date") > F.lit(window_floor))
+print(f"Window: {window_floor} (exclusive) to {latest_date}")
+
+# Eligibility is judged inside the window: a symbol with 20 years of history but a
+# 3-day tail in the window has no current risk to report.
 ticker_counts = (
-    prices_df
+    prices_windowed
     .groupBy("ticker")
     .agg(F.count("*").alias("num_days"))
     .filter(F.col("num_days") >= min_price_points)
 )
 
 eligible_tickers = [row.ticker for row in ticker_counts.select("ticker").collect()]
-print(f"Eligible tickers (>= {min_price_points} days): {len(eligible_tickers)}")
-print(f"  {eligible_tickers}")
+print(f"Eligible tickers (>= {min_price_points} days in window): {len(eligible_tickers)}")
+print(f"  {eligible_tickers if len(eligible_tickers) <= 20 else eligible_tickers[:20] + ['...']}")
 
 # Filter to eligible tickers. No global sort here: the lag() window below orders within
 # each ticker, and the grouped-map function sorts its own group -- an ordered scan would
 # not survive the groupBy shuffle anyway.
 prices_filtered = (
-    prices_df
+    prices_windowed
     .join(ticker_counts.select("ticker"), on="ticker")
     .select("ticker", "date", "close")
 )
@@ -347,6 +371,9 @@ WHERE run_id = '{run_id}'
 
 # COMMAND ----------
 
+# Latest snapshot per ticker. The table keeps one row per ticker per window, so a run
+# every weekday accumulates a snapshot history -- selecting all of it would show every
+# past window mixed in with today's.
 display(spark.sql(f"""
 SELECT
     ticker,
@@ -359,7 +386,10 @@ SELECT
     ROUND(max_drawdown, 4) as max_drawdown,
     computation_duration_ms
 FROM {metrics_table}
-ORDER BY ticker
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY ticker ORDER BY window_end DESC, computed_at DESC
+) = 1
+ORDER BY annualized_volatility DESC
 """))
 
 # COMMAND ----------
@@ -367,5 +397,7 @@ ORDER BY ticker
 dbutils.notebook.exit(json.dumps({
     "run_id": run_id,
     "status": "succeeded",
-    "tickers_computed": tickers_computed,
+    "tickers_computed": len(tickers_computed),
+    "window_start": str(window_floor),
+    "window_end": str(latest_date),
 }))
