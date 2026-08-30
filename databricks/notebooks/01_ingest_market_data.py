@@ -98,11 +98,17 @@ run_start = datetime.now(timezone.utc)
 # at 'running' forever -- which silently skews the dashboard success-rate tile and keeps
 # failed_runs at zero. The job sets max_concurrent_runs=1, so any 'ingest' row still
 # 'running' as we start is by definition abandoned by an earlier run.
+#
+# finished_at is deliberately left NULL. Stamping current_timestamp() here dates the
+# failure to whenever the *next* run happened to start, which for a row stranded a week
+# ago reports a 6.8-day run and drags the dashboard's duration series with it. We do not
+# know when the run died, and NULL says that; the duration tiles use
+# TIMESTAMPDIFF(started_at, finished_at), which yields NULL and drops out of the chart.
 spark.sql(f"""
 UPDATE {full_schema}.pipeline_runs
 SET status = 'failed',
-    finished_at = COALESCE(finished_at, current_timestamp()),
-    error_message = 'Run never reported completion; marked failed by a subsequent run'
+    error_message = 'Run never reported completion; marked failed by a subsequent run. '
+                 || 'Finish time unknown, so finished_at is left NULL.'
 WHERE run_type = 'ingest'
   AND status = 'running'
 """)
