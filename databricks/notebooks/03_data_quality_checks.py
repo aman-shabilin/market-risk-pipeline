@@ -363,11 +363,6 @@ all_scores = (
     .union(gap_scores)
 )
 
-# Cached before the MERGE reads it, because the count below reads it again and the four
-# checks behind it are not cheap to redo -- the outlier check alone is a rolling window
-# over every scoped ticker's recent history.
-all_scores.cache()
-
 all_scores.createOrReplaceTempView("new_scores")
 
 spark.sql(f"""
@@ -380,7 +375,16 @@ WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *
 """)
 
-total_checks = all_scores.count()
+# Counted from the table, not from all_scores. `.cache()` is unavailable on serverless
+# (NOT_SUPPORTED_WITH_SERVERLESS: PERSIST TABLE), so counting the DataFrame would re-run
+# all four checks -- and the outlier check is a rolling window over every scoped ticker's
+# recent history. The MERGE has already landed the rows; ask Delta instead.
+total_checks = spark.sql(f"""
+SELECT COUNT(*) AS scores
+FROM {quality_table}
+WHERE check_date = current_date()
+""").collect()[0]["scores"]
+
 print(f"\nWrote {total_checks} quality scores.")
 
 # COMMAND ----------

@@ -374,27 +374,38 @@ else:
 
 # COMMAND ----------
 
+# The validity rule lives in one place and is used twice below -- once to filter and
+# once to count what the filter dropped -- so the two cannot drift apart.
+IS_VALID_ROW = (
+    F.col("ticker").isNotNull()
+    & (F.col("ticker") != "")
+    & F.col("date").isNotNull()
+    & (F.col("close") > 0)
+    & (F.col("high") >= F.col("low"))
+    & (F.col("volume") >= 0)
+)
+
+normalized_df = raw_df.withColumn("ticker", F.upper(F.trim(F.col("ticker"))))
+
 validated_df = (
-    raw_df
-    .withColumn("ticker", F.upper(F.trim(F.col("ticker"))))
-    .filter(F.col("ticker").isNotNull() & (F.col("ticker") != ""))
-    .filter(F.col("date").isNotNull())
-    .filter(F.col("close") > 0)
-    .filter(F.col("high") >= F.col("low"))
-    .filter(F.col("volume") >= 0)
+    normalized_df
+    .filter(IS_VALID_ROW)
     .withColumn("ingested_at", F.current_timestamp())
     .withColumn("source", F.lit(source))
 )
 
-# Cache the raw read, not the validated view: five actions below trace back to it (both
-# counts, the MERGE, the distinct-ticker collect), and uncached each one re-fetches or
-# re-serialises the whole source. Caching upstream materialises it once and leaves the
-# validation filters -- which are cheap -- to re-run over the cached rows.
-if source != "auto_loader":
-    raw_df.cache()
+# Both counts come from one pass. `.cache()` is not available here -- serverless compute
+# rejects it with NOT_SUPPORTED_WITH_SERVERLESS (PERSIST TABLE) -- so the way to avoid
+# re-running the source is to ask fewer questions of it, rather than to materialise it.
+# A separate `validated_df.count()` would re-serialise every fetched row a second time;
+# summing the predicate as an integer answers both questions in a single scan.
+counts = normalized_df.agg(
+    F.count(F.lit(1)).alias("total_raw"),
+    F.sum(IS_VALID_ROW.cast("int")).alias("total_valid"),
+).collect()[0]
 
-total_raw = raw_df.count()
-total_valid = validated_df.count()
+total_raw = counts["total_raw"]
+total_valid = counts["total_valid"] or 0
 validation_failures = total_raw - total_valid
 
 print(f"Total raw rows:        {total_raw}")
@@ -444,7 +455,21 @@ print(f"  Operation: {merge_metrics['operation']}")
 
 from pyspark.sql.functions import lit, current_timestamp, array
 
-tickers_processed = [row.ticker for row in validated_df.select("ticker").distinct().collect()]
+# Read back from Delta rather than from validated_df: that DataFrame traces all the way
+# to the fetched rows, so collecting from it would re-run the whole ingest a second time
+# purely to list the symbols. The MERGE has already written them, `ingested_at` was
+# stamped by this run, and both it and run_start come from the driver clock -- so
+# ">= run_start" selects exactly this run's rows without depending on executor clocks.
+tickers_processed = [
+    row.ticker
+    for row in (
+        spark.table(target_table)
+        .filter((F.col("source") == source) & (F.col("ingested_at") >= F.lit(run_start)))
+        .select("ticker")
+        .distinct()
+        .collect()
+    )
+]
 
 spark.sql(f"""
 UPDATE {full_schema}.pipeline_runs

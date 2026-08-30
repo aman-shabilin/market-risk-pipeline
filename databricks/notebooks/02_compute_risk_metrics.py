@@ -54,6 +54,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 run_id = str(uuid.uuid4())
+run_start = datetime.now(timezone.utc)
 
 # Reap orphaned runs before registering this one -- see the note in 01_ingest_market_data.
 spark.sql(f"""
@@ -182,6 +183,14 @@ metrics_schema = StructType([
 
 TRADING_DAYS = 252
 
+# One timestamp for the whole run, fixed on the driver and closed over by the function
+# below. Stamping `pd.Timestamp.now()` inside each group instead would spread computed_at
+# across however long the run takes and put it on executor clocks, which makes "this
+# run's rows" impossible to select exactly -- and that selection is how the cells after
+# the MERGE avoid re-running the whole grouped map. Per-group timing stays per-group, in
+# computation_duration_ms.
+COMPUTED_AT = pd.Timestamp(run_start)
+
 def compute_metrics(pdf: pd.DataFrame) -> pd.DataFrame:
     """Compute full risk metric set for a single ticker.
 
@@ -237,7 +246,7 @@ def compute_metrics(pdf: pd.DataFrame) -> pd.DataFrame:
         "cvar_99": cvar_99,
         "sharpe_ratio": sharpe,
         "max_drawdown": max_dd,
-        "computed_at": pd.Timestamp.now(tz="UTC"),
+        "computed_at": COMPUTED_AT,
         "computation_duration_ms": duration_ms,
     }])
 
@@ -256,14 +265,11 @@ metrics_clean = metrics_df.filter(
     & ~F.isnan(F.col("annualized_volatility"))
 )
 
-# Cached because the count, the display, the MERGE and the run-audit update below all
-# consume this DataFrame; without it the whole grouped-map DAG re-runs each time and
-# computed_at / computation_duration_ms differ between the merged rows and the display.
-metrics_clean.cache()
-metrics_count = metrics_clean.count()
-
-print(f"Metrics computed for {metrics_count} tickers")
-display(metrics_clean)
+# Deliberately no action on metrics_clean here. `.cache()` is rejected on serverless
+# compute (NOT_SUPPORTED_WITH_SERVERLESS: PERSIST TABLE), so every action against this
+# DataFrame re-runs the entire grouped map. The MERGE below is therefore made the single
+# consumer, and the count, display and ticker list all read the gold table afterwards --
+# one execution instead of four, and the numbers reported are the ones actually stored.
 
 # COMMAND ----------
 
@@ -296,6 +302,25 @@ WHEN NOT MATCHED THEN INSERT *
 """)
 
 print("Metrics merged into gold table.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## This Run's Metrics
+# MAGIC
+# MAGIC Read back from the gold table rather than from the DataFrame, so the grouped map
+# MAGIC runs once. `computed_at` is the single driver-side timestamp fixed above and the
+# MAGIC MERGE overwrites it on matched rows, so `>= run_start` is exactly this run's output.
+
+# COMMAND ----------
+
+run_metrics = spark.table(metrics_table).filter(F.col("computed_at") >= F.lit(run_start))
+
+metrics_count = run_metrics.count()
+tickers_computed = [row.ticker for row in run_metrics.select("ticker").distinct().collect()]
+
+print(f"Metrics computed for {metrics_count} tickers")
+display(run_metrics.orderBy(F.col("annualized_volatility").desc()))
 
 # COMMAND ----------
 
@@ -351,8 +376,6 @@ print("Rolling metrics view created.")
 # MAGIC ## Update Pipeline Run
 
 # COMMAND ----------
-
-tickers_computed = [row.ticker for row in metrics_clean.select("ticker").distinct().collect()]
 
 spark.sql(f"""
 UPDATE {full_schema}.pipeline_runs
