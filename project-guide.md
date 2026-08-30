@@ -26,6 +26,112 @@ source (S3 / Yahoo / Auto Loader)  ->  Spark validation  ->  Delta Lake (MERGE) 
 
 ---
 
+## Current Status and Roadmap
+
+**Read this section first.** It is the handover point for a new session. Last
+updated 2026-08-30 at commit `198ab24`.
+
+The project is being worked through a **portfolio-readiness plan**: the code was
+already sound, but the repository did not *present* as sound to someone spending
+ninety seconds on it. The plan below is ordered by impact per unit of effort, not
+by technical interest.
+
+### Verified state
+
+| Check | Value |
+|-------|-------|
+| Tests | 143 passing |
+| Coverage | 84.94% (gate: 80%) |
+| `ruff check src/ tests/` | clean |
+| `mypy src/` (strict) | clean |
+| GitHub Actions CI | **green** on `main` |
+| Repo | public, `github.com/aman-shabilin/market-risk-pipeline` |
+| Databricks | job runs daily on schedule; last observed run 3m42s, 62,234 rows read / 7,576 written |
+
+### Working conventions
+
+- **Use `.venv-1`, not `.venv`.** `.venv` has no `pytest` installed. Run dev
+  commands as `.venv-1/bin/python -m ...`.
+- **CI must stay green.** It runs exactly three gates: `pytest --cov`,
+  `ruff check src/ tests/`, `mypy src/`. Note the lint gate covers only `src/`
+  and `tests/` — `databricks/` and `spark_exercises/` sit outside it and
+  currently carry ~146 ruff violations, which is why they do not break CI.
+- **Commit messages carry no `Co-Authored-By` trailer.**
+- Work happens directly on `main` (solo project, no PR flow).
+- Notebook changes cannot be covered by the test suite; verify them with
+  `python -m py_compile` and by reading.
+
+### Plan progress
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | Fix the failing CI (5 ruff errors, 1 mypy error) | **done** — `fbca5ef` |
+| 2 | Mermaid architecture diagram + screenshot scaffolding | **done** — `3b7dc04` |
+| 3 | Capture and embed Databricks screenshots | **mostly done** — `198ab24`; 4 of 5 captured |
+| 4 | Split `spark_exercises/` into its own repository | **not started** |
+| 5 | Fix `02_compute_risk_metrics.py` (see below) | **not started — highest priority** |
+| 6 | Backfill a realistic data volume and publish timings | **not started** |
+| 7 | Add a dbt or Airflow layer | **not started** |
+
+Items 1-3 existed because a public repo with a red CI badge and no visual
+evidence of the Databricks work reads as unfinished regardless of code quality.
+Items 4-7 raise the ceiling rather than repairing the floor.
+
+### Outstanding on item 3
+
+One capture is missing: `docs/img/05-quality-scorecard.png`, the ticker ×
+check-name quality heatmap from the dashboard's Operations tab. This is the
+project's clearest differentiator, so it is worth getting. Its `![...]`
+reference already exists in `README.md` but is commented out, so nothing renders
+broken meanwhile. See `docs/CAPTURE_CHECKLIST.md` for the procedure and two
+known nits (a `Sum of ...` axis label on the volatility chart, and the account
+email visible in the run-history capture).
+
+### Item 5 in detail — the next thing to do
+
+`databricks/notebooks/02_compute_risk_metrics.py` has one genuine correctness
+bug and three quality problems. In priority order:
+
+1. **Row ordering is not guaranteed inside the Pandas UDF** (bug). The UDF takes
+   `dates[0]` / `dates[-1]` as the metric window bounds (lines 197-198) and runs
+   `np.cumprod` for max drawdown (line 188), both of which depend on rows
+   arriving in date order. Sorting the DataFrame upstream does not survive the
+   `groupBy` shuffle, so `max_drawdown` can vary between runs on identical
+   input. Fix: `pdf = pdf.sort_values("date")` as the first statement in the UDF.
+2. **`PandasUDFType.GROUPED_MAP` is deprecated** (line 157) — removed in Spark 4,
+   so it will break outright on a future DBR. Migrate to
+   `returns_df.groupBy("ticker").applyInPandas(fn, schema=metrics_schema)`, and
+   update the tech-stack table below plus the README wording if the API name
+   surfaces there.
+3. **`metrics_clean.count()` is called twice** (lines 224, 315) with no
+   `.cache()`, re-executing the whole UDF DAG each time.
+4. **Dead code and duplicated logic.** `rolling_metrics_df` (line 271) is
+   computed and never used; the rolling logic is then re-implemented
+   independently in SQL for the `v_rolling_metrics` view, so the two can drift.
+   That is the exact failure mode `metrics/service.py` was built to prevent on
+   the Python side. Pick one definition.
+
+Also minor: `F.isnan(...) == False` (line 221) is non-idiomatic and misses NULLs.
+
+### Why item 6 matters
+
+The pipeline reads ~62k rows per run across 10 tickers. That is a laptop-sized
+problem, which undercuts the Delta MERGE / liquid clustering / Pandas UDF
+framing — distributing that work is not yet justified by the data. Backfilling
+roughly ten years across ~100 tickers (~250k rows) and publishing before/after
+run timings is what turns this from a well-built service into a data engineering
+project.
+
+### Confidentiality constraint on screenshots
+
+Captures must come from the personal portfolio workspace only. The Databricks
+left sidebar renders the full catalog list in the SQL Editor, Catalog Explorer
+and notebook views, so a capture taken in a workspace holding internal or
+production catalogs would publish those names to a public repository. Check each
+image for the sidebar, the workspace URL and account chrome before committing.
+
+---
+
 ## Repository Structure
 
 ```
@@ -50,6 +156,9 @@ market-risk-pipeline/
 ├── tests/                     # Unit + integration test suite
 │   ├── unit/                  #   Isolated metric/schema/repo tests
 │   └── integration/           #   End-to-end API + pipeline tests
+├── docs/
+│   ├── img/                   #   Dashboard + workflow screenshots used by README
+│   └── CAPTURE_CHECKLIST.md   #   How to (re)capture those screenshots safely
 ├── .github/workflows/ci.yml   # GitHub Actions CI pipeline
 ├── Dockerfile                 # Multi-stage Docker build
 ├── docker-compose.yml         # App + Redis services
@@ -468,6 +577,8 @@ The `spark_exercises/` directory contains PySpark data cleansing exercises unrel
 3. **No MLflow integration** - Could version metric models and track drift
 4. **Dashboard requires manual setup** - SQL queries need to be imported manually (no Terraform/API automation yet)
 5. **Runs as a user, not a service principal** - The job's `run_as` is the creating user. A service principal would give a non-human audit identity and least-privilege access
+6. **`02_compute_risk_metrics.py` needs work** - Row ordering inside the Pandas UDF is not guaranteed (affects `max_drawdown`), the `GROUPED_MAP` API is deprecated, and the rolling-metrics logic is duplicated between Python and SQL. See *Current Status and Roadmap → Item 5* for detail
+7. **Data volume is small** - ~62k rows read per run across 10 tickers, which does not yet justify the distributed machinery
 
 ---
 
