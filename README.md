@@ -4,6 +4,54 @@ A financial risk analytics pipeline with **two deployment targets**: a standalon
 Python/FastAPI service and a Databricks-native implementation using Delta Lake,
 Spark, and SQL Dashboards.
 
+## Architecture
+
+The Databricks implementation is the primary target — a medallion-layered Delta
+Lake pipeline orchestrated by Databricks Workflows on serverless compute, with
+run auditing and data quality scoring as first-class tables:
+
+```mermaid
+flowchart TD
+    Y["Yahoo Finance"] --> ING
+    S3["S3 / UC Volume<br/>Auto Loader, incremental"] --> ING
+
+    ING["01_ingest_market_data<br/>Spark validation"]
+    ING -->|"Delta MERGE on (ticker, date)"| MP
+
+    MP[("market_prices · Silver<br/>CHECK constraints · CDF<br/>CLUSTER BY (ticker, date)")]
+
+    MP --> QC["03_data_quality_checks<br/>freshness · completeness<br/>outliers · gaps"]
+    MP --> MET["02_compute_risk_metrics<br/>Pandas UDF per ticker"]
+    MP --> VR[["v_rolling_metrics<br/>21-day window functions"]]
+
+    QC -->|"0-1 scores"| DQ[("data_quality_scores")]
+    MET -->|"Delta MERGE"| CM[("computed_metrics · Gold<br/>VaR · CVaR · volatility<br/>Sharpe · max drawdown")]
+
+    RUNS[("pipeline_runs<br/>execution audit log")]
+
+    CM --> DASH["Databricks SQL Dashboard"]
+    VR --> DASH
+    DQ --> DASH
+    RUNS --> DASH
+
+    classDef src fill:#e8eaf6,stroke:#5c6bc0,color:#1a237e
+    classDef job fill:#e0f2f1,stroke:#26a69a,color:#004d40
+    classDef tbl fill:#fff8e1,stroke:#ffa726,color:#e65100
+    classDef obs fill:#fce4ec,stroke:#ec407a,color:#880e4f
+    classDef out fill:#ede7f6,stroke:#7e57c2,color:#311b92
+    class Y,S3 src
+    class ING,QC,MET job
+    class MP,CM,VR tbl
+    class DQ,RUNS obs
+    class DASH out
+```
+
+Tasks run in the order `ingest → quality checks → metrics`, so bad data is
+scored before it reaches metric computation. Quality failures are a soft gate —
+they are recorded but do not block the run.
+
+The standalone service covers the same metric logic behind a REST API:
+
 ```
 source (local CSV / S3 / Yahoo)  ->  validate  ->  SQL  ->  metrics  ->  REST + cache
 ```
@@ -218,6 +266,45 @@ for incremental ingestion, and a SQL Dashboard with 15+ pre-built queries.
 
 Runs on serverless compute (no cluster management). See `project-guide.md` for
 full deployment instructions and feature details.
+
+### Orchestration
+
+The workflow runs weekdays at 18:00 ET after market close, with retries on
+ingestion and email alerts on failure.
+
+<!-- Capture per docs/CAPTURE_CHECKLIST.md, then uncomment:
+![Three-task DAG green end to end on serverless compute](docs/img/01-workflow-run-graph.png)
+
+![Scheduled run history with per-run duration and status](docs/img/02-job-run-history.png)
+-->
+
+Every execution writes a row to `pipeline_runs` with status, duration, row
+counts and captured errors. A run that dies mid-notebook never reaches its own
+completion update, so each notebook reaps rows left stranded at `running` by a
+previous run before registering its own — otherwise the dashboard success rate
+would drift down silently while `failed_runs` stayed at zero.
+
+### Data quality
+
+Four checks — freshness, completeness, outliers and date gaps — each score every
+ticker from 0 to 1 into `data_quality_scores`, making quality trendable rather
+than a pass/fail assertion.
+
+<!-- Capture per docs/CAPTURE_CHECKLIST.md, then uncomment:
+![Ticker by check-name heatmap of quality scores](docs/img/04-quality-scorecard.png)
+-->
+
+### Risk metrics
+
+<!-- Capture per docs/CAPTURE_CHECKLIST.md, then uncomment:
+![Current risk metrics, volatility comparison and risk-return scatter](docs/img/03-risk-metrics-dashboard.png)
+
+![Unity Catalog lineage from market_prices through to computed_metrics](docs/img/05-unity-catalog-lineage.png)
+-->
+
+Delta tables carry column comments, CHECK constraints and Change Data Feed, so
+Unity Catalog renders end-to-end lineage from ingestion through to the Gold
+metrics table.
 
 ## Development
 

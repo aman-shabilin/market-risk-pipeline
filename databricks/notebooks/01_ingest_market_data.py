@@ -58,6 +58,20 @@ from datetime import datetime, timezone
 run_id = str(uuid.uuid4())
 run_start = datetime.now(timezone.utc)
 
+# Reap orphaned runs before registering this one. A notebook that raises stops at the
+# failing cell, so its final "succeeded" UPDATE never executes and the row is stranded
+# at 'running' forever -- which silently skews the dashboard success-rate tile and keeps
+# failed_runs at zero. The job sets max_concurrent_runs=1, so any 'ingest' row still
+# 'running' as we start is by definition abandoned by an earlier run.
+spark.sql(f"""
+UPDATE {full_schema}.pipeline_runs
+SET status = 'failed',
+    finished_at = COALESCE(finished_at, current_timestamp()),
+    error_message = 'Run never reported completion; marked failed by a subsequent run'
+WHERE run_type = 'ingest'
+  AND status = 'running'
+""")
+
 spark.sql(f"""
 INSERT INTO {full_schema}.pipeline_runs
 VALUES (

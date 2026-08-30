@@ -545,7 +545,7 @@ curl -X DELETE http://localhost:8000/api/v1/portfolios/tech
 2. **Liquid Clustering over partitioning** - Better for the query patterns (filter by ticker + date range) without partition skew
 3. **Pandas UDFs over Spark native** - Complex financial math (VaR percentile, CVaR tail mean, drawdown) is cleaner in NumPy; Pandas UDFs let Spark distribute it
 4. **Separate quality check step** - Runs between ingest and metrics so bad data never feeds into metric computation; quality failures don't block the pipeline (soft gate)
-5. **Pipeline run auditing** - Every execution writes to `pipeline_runs` enabling SLA tracking and failure investigation from the dashboard
+5. **Pipeline run auditing** - Every execution writes to `pipeline_runs` enabling SLA tracking and failure investigation from the dashboard. Because a notebook that raises stops at the failing cell and never reaches its own completion update, each notebook first reaps rows left stranded at `running` by an earlier run of the same `run_type` (safe because the job pins `max_concurrent_runs` to 1). Without this the success-rate tile drifts down while `failed_runs` stays at zero
 6. **Quality scoring (0-1)** - Normalized scores enable trending and alerting thresholds without hard-coding check-specific logic
 7. **Notebook parameters via widgets** - Same notebook handles dev (manual widget input) and production (workflow-injected parameters)
 8. **Change Data Feed enabled** - Downstream consumers (streaming jobs, BI tools) can subscribe to incremental changes without full table scans
